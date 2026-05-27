@@ -1,0 +1,24 @@
+# === Secrets (never commit) ===
+hf_token.txt
+hf_token.txt.bak
+.gemini_key
+*.gemini_key
+*.key
+.env
+
+# === Local-only / generated ===
+.venv/
+__pycache__/
+*.pyc
+*.pyo
+conversations/
+system_logs/
+archive/
+
+# === Backups ===
+*.bak
+
+# === Tooling caches ===
+.pytest_cache/
+.mypy_cache/
+.DS_Store

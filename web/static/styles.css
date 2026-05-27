@@ -1,0 +1,72 @@
+/* Phase B: small custom layer on top of Tailwind (CDN). Tailwind handles
+   layout/colors; this file holds the bits Tailwind core doesn't give us
+   cleanly: the card/title/button shorthands, the status dot, and the
+   chat-bubble slide-in animation. */
+
+.card {
+  background: #fff;
+  border: 1px solid rgb(226 232 240);   /* slate-200 */
+  border-radius: 8px;
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.04);
+  padding: 0.875rem 1rem;
+}
+
+.card-title {
+  font-size: 0.7rem;
+  font-weight: 600;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  color: rgb(100 116 139);              /* slate-500 */
+}
+
+.dot {
+  width: 0.7rem;
+  height: 0.7rem;
+  border-radius: 9999px;
+  display: inline-block;
+  background: rgb(148 163 184);         /* slate-400 default */
+  flex: 0 0 auto;
+}
+
+.btn {
+  font-size: 0.875rem;
+  padding: 0.4rem 0.75rem;
+  border-radius: 6px;
+  font-weight: 500;
+  transition: background-color 120ms ease, opacity 120ms ease;
+}
+.btn:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+.btn-slate {
+  background: rgb(241 245 249);         /* slate-100 */
+  border: 1px solid rgb(203 213 225);   /* slate-300 */
+  color: rgb(51 65 85);                 /* slate-700 */
+}
+.btn-slate:not(:disabled):hover { background: rgb(226 232 240); }
+
+.btn-primary {
+  background: rgb(37 99 235);           /* blue-600 */
+  color: #fff;
+}
+.btn-primary:not(:disabled):hover { background: rgb(29 78 216); }
+.btn-danger {
+  background: rgb(220 38 38);           /* red-600 */
+  color: #fff;
+}
+.btn-danger:not(:disabled):hover { background: rgb(185 28 28); }
+
+/* Event-log level colors */
+.log-INFO    { color: rgb(51 65 85); }    /* slate-700 */
+.log-WARNING { color: rgb(217 119 6); }   /* amber-600 */
+.log-ERROR,
+.log-CRITICAL { color: rgb(220 38 38); }  /* red-600 */
+.log-DEBUG   { color: rgb(148 163 184); } /* slate-400 (normally filtered out) */
+
+/* Chat bubble slide-in */
+@keyframes bubblein {
+  from { opacity: 0; transform: translateY(12px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+.bubble-in { animation: bubblein 150ms ease-out; }

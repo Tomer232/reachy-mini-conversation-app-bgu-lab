@@ -1,0 +1,119 @@
+"""FastAPI app: REST control plane, the /ws stream, and static file serving.
+
+Built by ``create_app(manager, broadcaster)`` so the entry point (laptop_chat)
+owns construction of the SystemManager and Broadcaster. The lifespan hook
+binds the broadcaster to the running loop and kicks off ``manager.startup()``
+as a background task (so the server starts accepting connections immediately,
+showing STARTING, rather than blocking until the robot is ready).
+"""
+
+from __future__ import annotations
+
+import logging
+from pathlib import Path
+
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+from fastapi.responses import JSONResponse, FileResponse
+from fastapi.staticfiles import StaticFiles
+from contextlib import asynccontextmanager
+import asyncio
+
+from system import (
+    SystemManager,
+    ConversationConflict,
+    NotReady,
+    InvalidSystemState,
+)
+
+
+log = logging.getLogger("reachy.web")
+
+STATIC_DIR = Path(__file__).parent / "static"
+
+
+def create_app(manager: SystemManager, broadcaster) -> FastAPI:
+
+    @asynccontextmanager
+    async def lifespan(app: FastAPI):
+        broadcaster.set_loop(asyncio.get_running_loop())
+        # Run startup concurrently so the server is already listening (and the
+        # browser can render STARTING) while VAD loads and SSH connects.
+        startup_task = asyncio.create_task(manager.startup())
+        # Phase B: robot daemon heartbeat (probes only while the robot is up).
+        manager.start_heartbeat()
+        try:
+            yield
+        finally:
+            startup_task.cancel()
+            try:
+                await startup_task
+            except (asyncio.CancelledError, Exception):
+                pass
+            await manager.shutdown()
+
+    app = FastAPI(title="Reachy Mini Handler Dashboard", lifespan=lifespan)
+
+    @app.get("/api/status")
+    async def api_status():
+        return manager.status()
+
+    @app.post("/api/conversation/start")
+    async def api_start():
+        try:
+            result = await manager.start_conversation()
+            return result
+        except ConversationConflict:
+            return JSONResponse(status_code=409, content={"error": "already_running"})
+        except NotReady as e:
+            return JSONResponse(status_code=503,
+                                content={"error": "not_ready", "state": e.state})
+
+    @app.post("/api/conversation/end")
+    async def api_end():
+        try:
+            return await manager.end_conversation("user")
+        except ConversationConflict:
+            return JSONResponse(status_code=409, content={"error": "not_running"})
+
+    @app.post("/api/system/stop")
+    async def api_system_stop():
+        try:
+            return await manager.stop_system("user_stop")
+        except InvalidSystemState as e:
+            return JSONResponse(status_code=409,
+                                content={"error": "invalid_state", "state": e.state})
+
+    @app.post("/api/system/start")
+    async def api_system_start():
+        # Blocking: returns once IDLE_BREATHING is reached (~7-10 s).
+        try:
+            return await manager.start_system("user_start")
+        except InvalidSystemState as e:
+            return JSONResponse(status_code=409,
+                                content={"error": "invalid_state", "state": e.state})
+
+    @app.websocket("/ws")
+    async def ws_endpoint(ws: WebSocket):
+        await ws.accept()
+        await broadcaster.register(ws)
+        try:
+            # Immediate snapshot so a fresh/refreshed tab reconstructs state.
+            await ws.send_json(manager.snapshot())
+            # We don't expect client messages, but we must keep receiving to
+            # detect disconnects.
+            while True:
+                await ws.receive_text()
+        except WebSocketDisconnect:
+            pass
+        except Exception:
+            log.debug("ws receive ended", exc_info=True)
+        finally:
+            broadcaster.unregister(ws)
+
+    @app.get("/")
+    async def index():
+        return FileResponse(STATIC_DIR / "index.html")
+
+    app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
+
+    return app
