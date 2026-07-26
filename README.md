@@ -67,10 +67,15 @@ API key auto-resolution order:
 2. `.gemini_key` next to `laptop_chat.py`
 3. `C:\Users\tomer\Desktop\job\reachy-mini\reachy-mini llm gemini token.txt`
 
-Override robot host:
+Robot host auto-resolution order:
+1. `--robot-host` CLI arg
+2. `REACHY_ROBOT_HOST` env var
+3. default `172.20.10.10`
+
+Override robot host (e.g. home dev against the old `.18`):
 
 ```powershell
-$env:ROBOT_HOST = "your.robot.ip"
+$env:REACHY_ROBOT_HOST = "10.100.102.18"   # or: python laptop_chat.py --robot-host 10.100.102.18
 ```
 
 ## Run

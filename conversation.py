@@ -61,7 +61,17 @@ from vad import SileroVAD
 
 # === Config ========================================================
 
-ROBOT_HOST = os.environ.get("ROBOT_HOST", "10.100.102.18")
+# Robot SSH host. The dashboard resolves this once at startup via
+# get_robot_host(cli) in SystemManager (--robot-host > REACHY_ROBOT_HOST env >
+# ROBOT_HOST_DEFAULT); see the "Robot host resolution" section below. ROBOT_HOST
+# here is a back-compat module alias (env > default, no CLI) kept only for
+# standalone dev/probe scripts that import it directly — the dashboard runtime
+# does not use it.
+# Default is the robot's address on the home WiFi. It changes when the robot
+# joins a different network — see "If the robot moved" in README.md, and pass
+# --robot-host to override without editing this file.
+ROBOT_HOST_DEFAULT = "10.100.102.18"
+ROBOT_HOST = os.environ.get("REACHY_ROBOT_HOST", ROBOT_HOST_DEFAULT)
 ROBOT_USER = os.environ.get("ROBOT_USER", "pollen")
 ROBOT_PASSWORD = os.environ.get("ROBOT_PASSWORD", "root")
 ROBOT_PYTHON = "/venvs/mini_daemon/bin/python"
@@ -124,6 +134,23 @@ SILENCE_HANGOVER_S = 0.8
 MAX_TURN_S = 30
 WAIT_FOR_SPEECH_S = 15
 MIN_SPEECH_S = 0.3
+
+# --- Input device ---
+# Case-insensitive name substring used to pick a sounddevice input. None keeps
+# PortAudio's default-device behavior. "USBAudio" matches the K11 wireless
+# lavalier receiver, which enumerates as the generic UAC "Microphone
+# (USBAudio1.0)" on Windows (no K11/REMAX branding in the device name).
+INPUT_DEVICE: str | None = "USBAudio"
+# When the substring matches under multiple host APIs, prefer in this order.
+# MME first because we want the entry that accepts 16000 mono via the OS
+# resampler — keeps blocksize tied to SILERO_FRAME_SIZE so the per-callback
+# 1024-byte invariant in record_with_vad's slicing loop holds.
+INPUT_HOSTAPI_PREFERENCE = (
+    "MME",
+    "Windows DirectSound",
+    "Windows WASAPI",
+    "Windows WDM-KS",
+)
 
 # Whether motion tools (play_emotion, dance, move_head) are registered
 # with Gemini Live. Captured in main.startup.flags so the telemetry
@@ -357,6 +384,118 @@ def get_api_key() -> str:
     )
 
 
+# === Robot host resolution =========================================
+
+def get_robot_host(cli_host: "str | None" = None) -> "tuple[str, str]":
+    """Resolve the robot SSH host, mirroring get_api_key's tiered fallback:
+    the --robot-host CLI arg, then the REACHY_ROBOT_HOST env var, then
+    ROBOT_HOST_DEFAULT. Returns (host, source); the source string is logged at
+    startup so it's clear which tier won."""
+    if cli_host:
+        return cli_host.strip(), "--robot-host"
+    env_host = os.environ.get("REACHY_ROBOT_HOST")
+    if env_host:
+        return env_host.strip(), "env REACHY_ROBOT_HOST"
+    return ROBOT_HOST_DEFAULT, "default"
+
+
+# === Input device resolution =======================================
+
+# Cache for _resolve_input_device(); populated by the first _ensure_input_device()
+# call (SystemManager.startup, or the first record_with_vad if startup didn't
+# eagerly prime it).
+_INPUT_DEVICE_INFO: "dict | None" = None
+
+
+def _default_input_info() -> dict:
+    """Sentinel returned when INPUT_DEVICE is None or no match is found.
+    device=None tells sounddevice to use PortAudio's default input."""
+    return {
+        "device": None,
+        "name": "<default>",
+        "host_api": "<default>",
+        "rate": GEMINI_INPUT_RATE,
+        "channels": 1,
+    }
+
+
+def _resolve_input_device() -> dict:
+    """Pick a sounddevice input matching INPUT_DEVICE (case-insensitive
+    substring) under the highest-priority host API in INPUT_HOSTAPI_PREFERENCE
+    that exposes the device with 16000 Hz mono. On no match or no 16k-mono
+    candidate, log a WARNING and fall back to the default input.
+
+    Logs one INFO line summarising the chosen device. The caller is expected
+    to invoke this exactly once per process via _ensure_input_device()."""
+    if INPUT_DEVICE is None:
+        info = _default_input_info()
+        log_capture.info("Input device: <default> (16000 Hz, 1 ch)")
+        return info
+
+    needle = INPUT_DEVICE.lower()
+    try:
+        devices = sd.query_devices()
+        hostapis = sd.query_hostapis()
+    except Exception as e:
+        log_capture.warning(
+            "INPUT_DEVICE=%r: sounddevice enumeration failed (%s); using default.",
+            INPUT_DEVICE, e)
+        return _default_input_info()
+
+    # Group matching device indices by host-API name.
+    by_host: dict[str, list[int]] = {}
+    for i, d in enumerate(devices):
+        if d.get("max_input_channels", 0) <= 0:
+            continue
+        name = d.get("name", "") or ""
+        if needle not in name.lower():
+            continue
+        hi = d.get("hostapi", -1)
+        host_name = hostapis[hi]["name"] if 0 <= hi < len(hostapis) else "?"
+        by_host.setdefault(host_name, []).append(i)
+
+    if not by_host:
+        log_capture.warning(
+            "INPUT_DEVICE=%r: no input device name contains that substring; "
+            "using default. Run tools/probe_mic.py to inspect.", INPUT_DEVICE)
+        return _default_input_info()
+
+    for host_name in INPUT_HOSTAPI_PREFERENCE:
+        for i in by_host.get(host_name, []):
+            try:
+                sd.check_input_settings(
+                    device=i, channels=1, samplerate=GEMINI_INPUT_RATE)
+            except Exception:
+                continue
+            d = devices[i]
+            chosen = {
+                "device": i,
+                "name": d.get("name", ""),
+                "host_api": host_name,
+                "rate": GEMINI_INPUT_RATE,
+                "channels": 1,
+            }
+            log_capture.info(
+                "Input device: %s (idx=%d, host=%s, 16000 Hz, 1 ch)",
+                chosen["name"], i, host_name)
+            return chosen
+
+    log_capture.warning(
+        "INPUT_DEVICE=%r: matched %d device(s) but none accepted 16000 Hz mono; "
+        "using default. (Adding a resample path is a separate change.)",
+        INPUT_DEVICE, sum(len(v) for v in by_host.values()))
+    return _default_input_info()
+
+
+def _ensure_input_device() -> dict:
+    """Resolve once, then return the cached dict. Safe to call from multiple
+    threads — concurrent first calls would each compute the same answer."""
+    global _INPUT_DEVICE_INFO
+    if _INPUT_DEVICE_INFO is None:
+        _INPUT_DEVICE_INFO = _resolve_input_device()
+    return _INPUT_DEVICE_INFO
+
+
 # === VAD-based mic capture =========================================
 
 def record_with_vad(vad: "SileroVAD",
@@ -432,11 +571,13 @@ def record_with_vad(vad: "SileroVAD",
             batch_max = 0.0
             batch_sum = 0.0
 
+    _input_info = _ensure_input_device()
     with sd.InputStream(
         samplerate=GEMINI_INPUT_RATE,
         channels=1,
         dtype="int16",
         blocksize=SILERO_FRAME_SIZE,
+        device=_input_info["device"],
         callback=cb,
     ):
         while True:
@@ -916,6 +1057,10 @@ def build_motion_tools() -> list:
     """Return a list of types.Tool objects, one per motion tool, populated
     from the installed-library catalog. If the libraries weren't loadable,
     each list is empty and Gemini just won't have those tools available.
+
+    Declarations are left BLOCKING (the SDK default). NON_BLOCKING was tried
+    on 2026-07-26 and made the model emit a tool call and then end the turn
+    without speaking at all — see the mute-turn note in _handle_tool_call.
     """
     tools: list = []
 
@@ -1020,6 +1165,7 @@ def build_live_config() -> "types.LiveConnectConfig":
 def startup_flags() -> dict:
     """The flags dict re-emitted in each conversation's main.startup event so
     summary.json's `config` block stays populated (Phase A adjustment C/E)."""
+    info = _ensure_input_device()
     return {
         "model": GEMINI_MODEL,
         "voice": GEMINI_VOICE,
@@ -1038,19 +1184,63 @@ def startup_flags() -> dict:
         "drain_watchdog_timeout_s": DRAIN_WATCHDOG_TIMEOUT_S,
         "drain_first_chunk_timeout_s": DRAIN_FIRST_CHUNK_TIMEOUT_S,
         "drain_hard_abort_s": DRAIN_HARD_ABORT_S,
+        "input_device_name": info["name"],
+        "input_device_host_api": info["host_api"],
     }
 
 
-async def _handle_tool_call(tool_call, robot: "StreamingRobotPlayer", session) -> None:
+def _response_scheduling(audio_started: bool):
+    """Pick the FunctionResponseScheduling for a tool reply.
+
+    The declarations are BLOCKING, so a tool response is not just data — it is
+    also the signal that lets the model continue. Which means the SAME reply
+    has two opposite effects depending on when the call arrived:
+
+      call BEFORE any audio  the model is WAITING on us. Reply with default
+                             scheduling; it then speaks its answer. Answering
+                             SILENT here means it never speaks at all — that is
+                             the mute conversation of run 2026-07-26_18-25-17,
+                             where all 4 turns called a tool before speaking.
+
+      call AFTER audio began the model already said its piece. A default-
+                             scheduled reply reads as "here's what you were
+                             waiting for, now answer", and it re-generates the
+                             whole response — the double-answer of run
+                             2026-07-26_17-26-01 turns 1/3/5. SILENT files the
+                             result into context without prompting a new
+                             generation.
+
+    SILENT is therefore only ever used on a turn that has already produced
+    audio, so this can never mute a turn: the worst case is the model skips
+    some follow-up remark it might otherwise have added.
+
+    (Also tried and rejected: behavior=NON_BLOCKING on the declarations. It
+    produced tool-call-then-end-turn with no speech, independent of scheduling.)
+    """
+    return types.FunctionResponseScheduling.SILENT if audio_started else None
+
+
+async def _handle_tool_call(tool_call, robot: "StreamingRobotPlayer", session,
+                            audio_started: bool = False) -> None:
     """Translate Gemini function_call events into motion-command JSON and
     ship them to the robot. Replies with a tool_response so Gemini knows
     the call completed (or what went wrong).
+
+    `audio_started` is True once this turn has received at least one audio
+    chunk from Gemini; it selects the response scheduling (see
+    _response_scheduling).
 
     Hard cap at MAX_TOOL_CALLS_PER_TURN: anything beyond the limit is
     suppressed — no MOTION sentinel sent, no FunctionResponse appended
     (Gemini gets nothing back and just keeps talking). The suppressed
     branch emits a tool.suppressed event with the function name+args.
+
+    We always reply, on both the dispatched and the suppressed path — an
+    unacknowledged call risks the SDK waiting forever and never emitting
+    turn_complete (the multi-tool hang class). The scheduling of that reply is
+    what differs, per _response_scheduling.
     """
+    scheduling = _response_scheduling(audio_started)
     function_calls = list(getattr(tool_call, "function_calls", []) or [])
     if not function_calls:
         return
@@ -1085,6 +1275,7 @@ async def _handle_tool_call(tool_call, robot: "StreamingRobotPlayer", session) -
                           "tool": name,
                           "reason": "per_turn_limit",
                           "limit": MAX_TOOL_CALLS_PER_TURN},
+                scheduling=scheduling,
             ))
             continue
 
@@ -1132,10 +1323,20 @@ async def _handle_tool_call(tool_call, robot: "StreamingRobotPlayer", session) -
         # bump the counter (they were never dispatched).
         _bump_tool_counter()
 
+        # Telemetry for the scheduling decision, so a run's events.jsonl says
+        # which branch fired per tool call without re-deriving it from the
+        # first_chunk timestamps.
+        _emit("tool.dispatched",
+              function_name=name,
+              status=status.get("status", "?"),
+              audio_started=audio_started,
+              scheduling="SILENT" if scheduling is not None else "default")
+
         function_responses.append(types.FunctionResponse(
             id=getattr(fc, "id", None),
             name=name,
             response=status,
+            scheduling=scheduling,
         ))
 
     if function_responses:
@@ -1304,7 +1505,10 @@ async def drain_one_turn_streaming(
             # server_content. Handle them first; they're fire-and-forget on our
             # side (the robot acks by playing the motion).
             if getattr(resp, "tool_call", None) is not None:
-                await _handle_tool_call(resp.tool_call, robot, session)
+                # first_chunk_t is the turn's "has Gemini started speaking yet"
+                # flag; it selects the tool-response scheduling.
+                await _handle_tool_call(resp.tool_call, robot, session,
+                                        audio_started=first_chunk_t is not None)
                 continue
             # Some SDK versions also surface tool_call_cancellation
             if getattr(resp, "tool_call_cancellation", None) is not None:

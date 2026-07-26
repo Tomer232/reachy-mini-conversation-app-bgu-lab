@@ -39,7 +39,7 @@ from conversation import (
     StreamingRobotPlayer,
     SileroVAD,
     get_api_key,
-    ROBOT_HOST,
+    get_robot_host,
     ROBOT_USER,
     ROBOT_PASSWORD,
     GEMINI_MODEL,
@@ -55,8 +55,8 @@ log = logging.getLogger("reachy.system")
 # Phase B robot daemon heartbeat. The daemon serves an HTTP status endpoint on
 # port 8000, independent of the SSH transport (port 22) — probing it never
 # touches the paramiko channel. Cadence 5 s, timeout 2 s, only while the robot
-# is meant to be up (IDLE_BREATHING / CONVERSATION_RUNNING).
-ROBOT_DAEMON_STATUS_URL = f"http://{ROBOT_HOST}:8000/api/daemon/status"
+# is meant to be up (IDLE_BREATHING / CONVERSATION_RUNNING). The full URL is
+# built per-instance from the resolved robot host (see SystemManager.__init__).
 HEARTBEAT_INTERVAL_S = 5.0
 HEARTBEAT_TIMEOUT_S = 2.0
 HEARTBEAT_MISS_LIMIT = 2  # consecutive misses before flipping the card red
@@ -92,8 +92,14 @@ class InvalidSystemState(Exception):
 
 
 class SystemManager:
-    def __init__(self, broadcaster):
+    def __init__(self, broadcaster, robot_host: "str | None" = None):
         self.broadcaster = broadcaster
+        # Robot SSH host, resolved once here at startup: --robot-host arg >
+        # REACHY_ROBOT_HOST env > default. Single source of truth for the SSH
+        # connection, the status-panel IP, and the daemon heartbeat URL.
+        self.robot_host, self.robot_host_source = get_robot_host(robot_host)
+        self._daemon_status_url = (
+            f"http://{self.robot_host}:8000/api/daemon/status")
         self.state = SystemState.STARTING
         self.vad: SileroVAD | None = None
         self.robot: StreamingRobotPlayer | None = None
@@ -136,7 +142,7 @@ class SystemManager:
         connected = bool(self.robot is not None and self.robot.connected)
         return {
             "connected": connected,
-            "ip": ROBOT_HOST,
+            "ip": self.robot_host,
             # Phase A stub: no live daemon probe yet. "active" while the SSH
             # channel is up, "unknown" otherwise. Real probe deferred to B.
             "daemon_status": "active" if connected else "unknown",
@@ -168,7 +174,7 @@ class SystemManager:
                         continue
                     ok = False
                     try:
-                        r = await client.get(ROBOT_DAEMON_STATUS_URL)
+                        r = await client.get(self._daemon_status_url)
                         ok = (r.status_code == 200)
                     except Exception:
                         ok = False
@@ -224,6 +230,14 @@ class SystemManager:
         except Exception as e:
             return self._fatal(f"VAD load failed: {e}")
 
+        # Resolve the mic up front so the chosen-device line lands in the idle
+        # system log alongside VAD-load / robot-ready (instead of waiting for
+        # the first conversation). Pure enumeration, no stream opened.
+        try:
+            await asyncio.to_thread(conv_mod._ensure_input_device)
+        except Exception:
+            log.exception("input device resolution failed; will retry lazily")
+
         await self._connect_robot()
 
     async def _connect_robot(self) -> bool:
@@ -234,12 +248,14 @@ class SystemManager:
 
         Blocking SSH connect is offloaded with asyncio.to_thread so the web
         server stays responsive (the page can show STARTING throughout)."""
-        log.info("Connecting to robot %s…", ROBOT_HOST)
+        log.info("robot host %s (source: %s)",
+                 self.robot_host, self.robot_host_source)
+        log.info("Connecting to robot %s…", self.robot_host)
         try:
             # robot_log_path=None: robot stderr flows via the log_robot_stderr
             # logger to the system log (idle) / laptop.log (in conversation).
             self.robot = await asyncio.to_thread(
-                StreamingRobotPlayer, ROBOT_HOST, ROBOT_USER, ROBOT_PASSWORD, None)
+                StreamingRobotPlayer, self.robot_host, ROBOT_USER, ROBOT_PASSWORD, None)
         except Exception as e:
             self._fatal(f"robot connection failed: {e}")
             return False

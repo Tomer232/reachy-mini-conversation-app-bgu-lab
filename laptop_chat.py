@@ -45,7 +45,7 @@ except Exception:
 
 import uvicorn
 
-from conversation import SCRIPT_DIR
+from conversation import SCRIPT_DIR, ROBOT_HOST_DEFAULT
 from logging_setup import init_base_logging, add_handler
 from web.broadcaster import Broadcaster, WebSocketLogHandler
 from system import SystemManager
@@ -66,6 +66,9 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
                    help=f"Bind address (default {DEFAULT_HOST}; localhost only).")
     p.add_argument("--no-browser", action="store_true",
                    help="Do not auto-open the dashboard in a browser.")
+    p.add_argument("--robot-host", default=None,
+                   help="Robot SSH host. Overrides the REACHY_ROBOT_HOST env "
+                        f"var (default {ROBOT_HOST_DEFAULT}).")
     return p.parse_args(argv)
 
 
@@ -105,7 +108,7 @@ def main(argv: list[str] | None = None) -> int:
     add_handler(WebSocketLogHandler(broadcaster), level=logging.INFO)
 
     # 3. SystemManager + app.
-    manager = SystemManager(broadcaster)
+    manager = SystemManager(broadcaster, robot_host=args.robot_host)
     app = create_app(manager, broadcaster)
 
     log.info("Starting dashboard on %s:%d (system log: %s)",
