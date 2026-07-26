@@ -54,6 +54,44 @@ Your browser opens `http://127.0.0.1:8765` automatically.
 **Step 4 — shut down.** Press `Ctrl-C` in the PowerShell window. The robot
 closes cleanly.
 
+## Show mode — you drive, Reachy performs
+
+For a lecture or a stage, where a live conversation is too risky. You press
+keys, Reachy speaks pre-recorded Hebrew lines and moves. Instant, identical
+every time, and **it needs no internet** — only the local link to the robot.
+
+The script lives in `show/cues.json`. After editing any line:
+
+```powershell
+.\.venv\Scripts\python.exe tools\build_show.py
+```
+
+That regenerates only the lines you changed, and rewrites the boss's cue sheet
+at `docs\SHOW_SCRIPT.md` — print that for whoever is speaking.
+
+Start the app as usual, then open the operator board in a second tab:
+
+```
+http://127.0.0.1:8765/show
+```
+
+Keep that tab on the laptop screen only — never on the projector.
+
+| Key | Does |
+|---|---|
+| `Space` | Fire the outlined cue and advance to the next one |
+| `↑` `↓` | Move the outline without firing |
+| `Esc` | STOP — silence Reachy immediately, back to breathing |
+| number/letter keys | Fire that cue directly, out of order (the reactions) |
+
+Cues with text speak; cues marked *motion only* just move, so they're safe to
+fire at any moment — including while Reachy is talking. The three **SAVE** cues
+(`s` `d` `f`) exist for when a live conversation stalls: "hold on a second",
+"say that again", "nice talking to you". They interrupt whatever is playing.
+
+Both modes share one robot connection, so you can switch between conversation
+and cues without restarting anything.
+
 ## If the robot moved to a different address
 
 Its IP changes when it joins a different WiFi. Find it:
@@ -76,6 +114,8 @@ on this laptop it is stale-pinned to an old hotspot address.
 | Reachy moves but never speaks | Something is holding the robot's audio — usually the desktop app. Close it and restart this one. |
 | Reachy answers twice | Known Gemini behaviour, guarded against; tell Claude and check `tool.dispatched` in the run's `events.jsonl`. |
 | Status stuck on Starting | The robot is not answering SSH. `Ctrl-C`, run preflight, start again. |
+| Preflight says cue text changed | You edited `show\cues.json` but didn't regenerate. Run `tools\build_show.py`. |
+| A cue says the wrong (old) line | Same cause — the audio on disk is from the previous wording. |
 
 ## Where the conversation is saved
 

@@ -1,12 +1,14 @@
-"""Pre-conversation check: mic, robot, API key. Run this before laptop_chat.py.
+"""Pre-show check: mic, robot, API key, cue audio. Run before laptop_chat.py.
 
-Answers the three questions that account for nearly every failed start:
+Answers the four questions that account for nearly every failed start:
 
   1. Is the lavalier receiver actually feeding audio? (device present is not
      the same as transmitter on — a receiver that enumerates fine can deliver
      digital silence.)
   2. Is the robot reachable on this network, and is its daemon alive?
   3. Does a Gemini API key resolve?
+  4. Does every show cue have audio matching its current text? (An edited
+     script with stale audio means Reachy says the old line on stage.)
 
 Prints the exact command to run at the end. Exit code 0 if everything passed,
 1 otherwise.
@@ -17,11 +19,13 @@ Prints the exact command to run at the end. Exit code 0 if everything passed,
 from __future__ import annotations
 
 import argparse
+import json
 import socket
 import sys
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(ROOT))
 
 import numpy as np
 import sounddevice as sd
@@ -50,7 +54,7 @@ def _port_open(host: str, port: int) -> bool:
 
 
 def check_mic() -> bool:
-    print("[1/3] Microphone")
+    print("[1/4] Microphone")
     try:
         info = conv._ensure_input_device()
     except Exception as e:
@@ -90,7 +94,7 @@ def check_mic() -> bool:
 
 
 def check_robot(cli_host: str | None) -> tuple[bool, str]:
-    print("[2/3] Robot")
+    print("[2/4] Robot")
     host, source = conv.get_robot_host(cli_host)
     print(f"      host  : {host} (from {source})")
     try:
@@ -116,8 +120,67 @@ def check_robot(cli_host: str | None) -> tuple[bool, str]:
     return False, host
 
 
+def check_show() -> bool:
+    """Every cue with text must have audio whose hash matches the current line.
+    Catches the classic failure: the script was edited, build_show.py was not
+    re-run, and the robot says the old line on stage."""
+    print("[4/4] Show cues")
+    cues_path = ROOT / "show" / "cues.json"
+    if not cues_path.exists():
+        print("      skip  no show/cues.json (show mode not in use)")
+        return True
+
+    try:
+        sys.path.insert(0, str(ROOT / "tools"))
+        import build_show
+        data = build_show.load_cues()
+    except SystemExit as e:
+        print(f"      FAIL  cue file invalid: {e}")
+        return False
+    except Exception as e:
+        print(f"      FAIL  could not read the cue file: {e}")
+        return False
+
+    problems = build_show.validate_motions(data)
+    manifest = {}
+    manifest_path = ROOT / "show" / "manifest.json"
+    if manifest_path.exists():
+        try:
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8")).get("cues", {})
+        except Exception:
+            problems.append("manifest.json unreadable")
+
+    voice = data.get("voice", "")
+    style = data.get("style", "")
+    spoken = motion_only = 0
+    for _section, cue in build_show.iter_cues(data):
+        text = cue.get("text")
+        if not text:
+            motion_only += 1
+            continue
+        spoken += 1
+        cid = cue["id"]
+        wav = ROOT / "show" / "audio" / f"{cid}.wav"
+        entry = manifest.get(cid)
+        if not wav.exists():
+            problems.append(f"{cid}: audio missing")
+        elif not entry:
+            problems.append(f"{cid}: not in manifest")
+        elif entry.get("hash") != build_show.text_hash(text, voice, style):
+            problems.append(f"{cid}: text changed since the audio was generated")
+
+    print(f"      cues  : {spoken} spoken, {motion_only} motion-only")
+    if problems:
+        for p in problems[:10]:
+            print(f"      FAIL  {p}")
+        print("            run: .\\.venv\\Scripts\\python.exe tools\\build_show.py")
+        return False
+    print("      OK    all cue audio present and current")
+    return True
+
+
 def check_api_key() -> bool:
-    print("[3/3] Gemini API key")
+    print("[3/4] Gemini API key")
     try:
         key = conv.get_api_key()
     except SystemExit as e:
@@ -144,10 +207,13 @@ def main() -> int:
     print()
     key_ok = check_api_key()
     print()
+    show_ok = check_show()
+    print()
 
-    if mic_ok and robot_ok and key_ok:
+    if mic_ok and robot_ok and key_ok and show_ok:
         print("All checks passed. Start the dashboard with:")
         print(f"    .\\.venv\\Scripts\\python.exe laptop_chat.py --robot-host {host}")
+        print("Conversation: http://127.0.0.1:8765/    Operator board: /show")
         return 0
     print("Fix the FAIL lines above, then run this again.")
     return 1

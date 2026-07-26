@@ -1,0 +1,90 @@
+{
+  "voice": "Aoede",
+  "model": "gemini-3.1-flash-tts-preview",
+  "cues": {
+    "greet": {
+      "hash": "e5793bfe6211df8c",
+      "duration_s": 4.52,
+      "file": "audio/greet.wav",
+      "text": "שלום לכולם! אני ריצי מיני, נעים מאוד להכיר."
+    },
+    "who_am_i": {
+      "hash": "4803b54611a19e69",
+      "duration_s": 10.84,
+      "file": "audio/who_am_i.wav",
+      "text": "אני רובוט שולחני קטן. אין לי ידיים ואין לי רגליים, אבל יש לי ראש שזז, אנטנות, ומצלמה. זה מספיק כדי לתקשר עם אנשים."
+    },
+    "look_around": {
+      "hash": "7b289b366994a6ea",
+      "duration_s": 4.8,
+      "file": "audio/look_around.wav",
+      "text": "כמה אנשים יש פה! תנו לי רגע להסתכל עליכם."
+    },
+    "tireless": {
+      "hash": "852ea76c71ce5a1e",
+      "duration_s": 9.96,
+      "file": "audio/tireless.wav",
+      "text": "אני יכול לענות על אותה שאלה מאה פעם ביום, בלי להתעייף ובלי לאבד סבלנות. את השיחות שדורשות אמפתיה — תשאירו לבני אדם."
+    },
+    "physical": {
+      "hash": "76b37b3bb8d140c6",
+      "duration_s": 8.24,
+      "file": "audio/physical.wav",
+      "text": "למה רובוט פיזי ולא עוד אפליקציה? כי אנשים מדברים אחרת עם משהו שמסתכל עליהם בחזרה."
+    },
+    "insurance": {
+      "hash": "2ab44299d9c82225",
+      "duration_s": 9.24,
+      "file": "audio/insurance.wav",
+      "text": "בעולם הביטוח יש הרבה רגעים קטנים של אי ודאות. דווקא שם נעים שיש מי שעונה מייד, גם בשתיים בלילה."
+    },
+    "honest": {
+      "hash": "2ddca4c230ec9de3",
+      "duration_s": 8.36,
+      "file": "audio/honest.wav",
+      "text": "אני עדיין טועה לפעמים, ואני לא מבין הכול. אבל אני לומד מהר, ואני אף פעם לא מגיע לעבודה במצב רוח רע."
+    },
+    "joke": {
+      "hash": "d3e0a4c37227729e",
+      "duration_s": 7.56,
+      "file": "audio/joke.wav",
+      "text": "רוצים בדיחה? למה הרובוט הלך לפסיכולוג? כי היו לו יותר מדי באגים מהילדות."
+    },
+    "dance_intro": {
+      "hash": "ab1c5489dc13da64",
+      "duration_s": 3.76,
+      "file": "audio/dance_intro.wav",
+      "text": "רוצים לראות אותי רוקד? זה החלק האהוב עליי."
+    },
+    "invite": {
+      "hash": "c8cb259297f6aca7",
+      "duration_s": 6.24,
+      "file": "audio/invite.wav",
+      "text": "מי רוצה לדבר איתי? תתקרבו, קחו את המיקרופון, ותשאלו אותי מה שבא לכם."
+    },
+    "hold_on": {
+      "hash": "9ea4ea3fc8d9072e",
+      "duration_s": 3.04,
+      "file": "audio/hold_on.wav",
+      "text": "רגע, אני צריך שנייה לחשוב."
+    },
+    "say_again": {
+      "hash": "4fa7824180ff2c87",
+      "duration_s": 3.08,
+      "file": "audio/say_again.wav",
+      "text": "לא שמעתי טוב, אפשר לחזור על זה?"
+    },
+    "nice_to_meet": {
+      "hash": "85ab573e6ab8ab47",
+      "duration_s": 3.8,
+      "file": "audio/nice_to_meet.wav",
+      "text": "היה ממש נעים לדבר איתך. תודה!"
+    },
+    "thanks": {
+      "hash": "730f2140e3eb9c1c",
+      "duration_s": 4.8,
+      "file": "audio/thanks.wav",
+      "text": "תודה רבה לכם! היה לי ממש כיף. אני חוזר לשולחן שלי."
+    }
+  }
+}

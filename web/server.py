@@ -24,6 +24,7 @@ from system import (
     NotReady,
     InvalidSystemState,
 )
+from show_player import ShowError
 
 
 log = logging.getLogger("reachy.web")
@@ -91,6 +92,40 @@ def create_app(manager: SystemManager, broadcaster) -> FastAPI:
         except InvalidSystemState as e:
             return JSONResponse(status_code=409,
                                 content={"error": "invalid_state", "state": e.state})
+
+    # ----- show mode (operator board) -----
+
+    @app.get("/api/show/cues")
+    async def api_show_cues():
+        """The cue catalog for the board: sections, hotkeys, text, durations."""
+        return {**manager.show.catalog(),
+                "playing": manager.show.playing,
+                "state": manager.state.name}
+
+    @app.post("/api/show/reload")
+    async def api_show_reload():
+        """Re-read cues.json after a script edit, without restarting."""
+        manager.show.load()
+        return manager.show.catalog()
+
+    @app.post("/api/show/fire/{cue_id}")
+    async def api_show_fire(cue_id: str):
+        try:
+            cue = manager.fire_cue(cue_id)
+            return {"fired": cue["id"], "duration_s": cue.get("duration_s")}
+        except InvalidSystemState as e:
+            return JSONResponse(status_code=409,
+                                content={"error": "invalid_state", "state": e.state})
+        except ShowError as e:
+            return JSONResponse(status_code=400, content={"error": str(e)})
+
+    @app.post("/api/show/stop")
+    async def api_show_stop():
+        return manager.stop_cue()
+
+    @app.get("/show")
+    async def show_page():
+        return FileResponse(STATIC_DIR / "show.html")
 
     @app.websocket("/ws")
     async def ws_endpoint(ws: WebSocket):

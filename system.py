@@ -48,6 +48,7 @@ from conversation import (
     SILERO_FRAME_SIZE,
 )
 from logging_setup import open_conversation_log, close_conversation_log
+from show_player import ShowPlayer, ShowError
 
 
 log = logging.getLogger("reachy.system")
@@ -115,6 +116,11 @@ class SystemManager:
         # STOPPED (handled by stop_system) instead of auto-returning to
         # IDLE_BREATHING. Cleared once stop_system reaches STOPPED.
         self._pending_stop = False
+        # Show mode. Built at construction (reads cues.json + manifest.json off
+        # disk, no robot needed) and given a getter rather than the robot
+        # itself, because stop_system/start_system replace self.robot.
+        self.show = ShowPlayer(lambda: self.robot,
+                               broadcast=self.broadcaster.broadcast_threadsafe)
         # Phase B heartbeat bookkeeping.
         self._heartbeat_task: asyncio.Task | None = None
         self._hb_misses = 0
@@ -408,6 +414,9 @@ class SystemManager:
                 raise InvalidSystemState(self.state.name)
             self._pending_stop = True
             try:
+                # Halt any cue first: its streaming thread writes to the SSH
+                # channel we are about to close.
+                self.show.stop()
                 if self.state == SystemState.CONVERSATION_RUNNING:
                     # Implicit end. The _run_conversation finally sees
                     # _pending_stop and leaves the state CONVERSATION_RUNNING
@@ -423,6 +432,28 @@ class SystemManager:
             finally:
                 self._pending_stop = False
         return {"state": self.state.name}
+
+    # ----- show mode -----
+
+    def fire_cue(self, cue_id: str) -> dict:
+        """Fire a show cue. Motion-only cues are allowed at any time, including
+        mid-conversation — a nod while Gemini talks is exactly what an operator
+        wants. Audio cues are allowed too, and deliberately so: the SAVE lines
+        ("hold on", "say that again") exist precisely for when a live
+        conversation stalls, and they interrupt whatever is being said. The
+        operator can hear the room; the UI marks the interrupt risk rather than
+        forbidding it.
+
+        Blocking calls are trivial (a few frames on the SSH channel) except for
+        the audio stream itself, which ShowPlayer runs on its own thread."""
+        if self.state not in (SystemState.IDLE_BREATHING,
+                              SystemState.CONVERSATION_RUNNING):
+            raise InvalidSystemState(self.state.name)
+        return self.show.fire(cue_id)
+
+    def stop_cue(self) -> dict:
+        self.show.stop()
+        return {"stopped": True}
 
     async def start_system(self, reason: str = "user_start") -> dict:
         """STOPPED -> STARTING -> IDLE_BREATHING. Brings the robot side back up
@@ -448,6 +479,12 @@ class SystemManager:
             except (asyncio.CancelledError, Exception):
                 pass
             self._heartbeat_task = None
+        # Same ordering rule as stop_system: no cue thread may outlive the SSH
+        # channel it writes to.
+        try:
+            self.show.stop()
+        except Exception:
+            log.exception("show.stop failed during shutdown")
         if self.state in (SystemState.SHUTTING_DOWN, SystemState.STOPPED):
             # Already torn down (or never came up). Still ensure robot closed.
             if self.robot is not None:

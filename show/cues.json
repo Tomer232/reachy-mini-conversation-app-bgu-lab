@@ -1,0 +1,173 @@
+{
+  "voice": "Aoede",
+  "tts_model": "gemini-3.1-flash-tts-preview",
+  "style": "קרא את המשפט בעברית, בטון חם, ידידותי וטבעי, בקצב רגיל של דיבור.",
+  "sections": [
+    {
+      "id": "opening",
+      "title": "פתיחה",
+      "cues": [
+        {
+          "id": "greet",
+          "hotkey": "1",
+          "label": "Greeting",
+          "text": "שלום לכולם! אני ריצי מיני, נעים מאוד להכיר.",
+          "motion": {"type": "emotion", "name": "welcoming1"},
+          "boss_cue": "ואיתנו כאן היום אורח קצת מיוחד…"
+        },
+        {
+          "id": "who_am_i",
+          "hotkey": "2",
+          "label": "Who I am",
+          "text": "אני רובוט שולחני קטן. אין לי ידיים ואין לי רגליים, אבל יש לי ראש שזז, אנטנות, ומצלמה. זה מספיק כדי לתקשר עם אנשים.",
+          "motion": {"type": "emotion", "name": "enthusiastic1"},
+          "boss_cue": "ריצי, ספר להם קצת על עצמך"
+        },
+        {
+          "id": "look_around",
+          "hotkey": "3",
+          "label": "Look at the room",
+          "text": "כמה אנשים יש פה! תנו לי רגע להסתכל עליכם.",
+          "motion": {"type": "emotion", "name": "curious1"},
+          "boss_cue": "תראה כמה אנשים באו"
+        }
+      ]
+    },
+    {
+      "id": "reactions",
+      "title": "תגובות (תנועה בלבד — בטוח לכל רגע)",
+      "cues": [
+        {"id": "nod", "hotkey": "q", "label": "Nod / agree", "motion": {"type": "dance", "name": "yeah_nod"}},
+        {"id": "laugh", "hotkey": "w", "label": "Laugh", "motion": {"type": "emotion", "name": "laughing1"}},
+        {"id": "curious", "hotkey": "e", "label": "Curious tilt", "motion": {"type": "emotion", "name": "inquiring1"}},
+        {"id": "wow", "hotkey": "r", "label": "Wow / amazed", "motion": {"type": "emotion", "name": "amazed1"}},
+        {"id": "think", "hotkey": "t", "label": "Thinking", "motion": {"type": "emotion", "name": "thoughtful1"}},
+        {"id": "attentive", "hotkey": "y", "label": "Listening pose", "motion": {"type": "emotion", "name": "attentive1"}}
+      ]
+    },
+    {
+      "id": "topic",
+      "title": "תוכן — רובוטים בשירות לקוחות",
+      "cues": [
+        {
+          "id": "tireless",
+          "hotkey": "4",
+          "label": "Never gets tired",
+          "text": "אני יכול לענות על אותה שאלה מאה פעם ביום, בלי להתעייף ובלי לאבד סבלנות. את השיחות שדורשות אמפתיה — תשאירו לבני אדם.",
+          "motion": {"type": "emotion", "name": "helpful1"},
+          "boss_cue": "מה בעצם רובוט יכול לעשות בשירות?"
+        },
+        {
+          "id": "physical",
+          "hotkey": "5",
+          "label": "Why physical, not an app",
+          "text": "למה רובוט פיזי ולא עוד אפליקציה? כי אנשים מדברים אחרת עם משהו שמסתכל עליהם בחזרה.",
+          "motion": {"type": "emotion", "name": "attentive2"},
+          "boss_cue": "אבל יש לנו כבר אפליקציה ובוט באתר"
+        },
+        {
+          "id": "insurance",
+          "hotkey": "6",
+          "label": "The insurance angle",
+          "text": "בעולם הביטוח יש הרבה רגעים קטנים של אי ודאות. דווקא שם נעים שיש מי שעונה מייד, גם בשתיים בלילה.",
+          "motion": {"type": "emotion", "name": "understanding1"},
+          "boss_cue": "ואיפה זה נוגע לעולם שלנו?"
+        },
+        {
+          "id": "honest",
+          "hotkey": "7",
+          "label": "Honest limitation",
+          "text": "אני עדיין טועה לפעמים, ואני לא מבין הכול. אבל אני לומד מהר, ואני אף פעם לא מגיע לעבודה במצב רוח רע.",
+          "motion": {"type": "emotion", "name": "oops1"},
+          "boss_cue": "ומה אתה עדיין לא יודע לעשות?"
+        }
+      ]
+    },
+    {
+      "id": "fun",
+      "title": "הומור וריקוד",
+      "cues": [
+        {
+          "id": "joke",
+          "hotkey": "8",
+          "label": "Joke",
+          "text": "רוצים בדיחה? למה הרובוט הלך לפסיכולוג? כי היו לו יותר מדי באגים מהילדות.",
+          "motion": {"type": "emotion", "name": "laughing2"},
+          "boss_cue": "יש לך גם בדיחה בשבילנו?"
+        },
+        {
+          "id": "dance_intro",
+          "hotkey": "9",
+          "label": "Announce the dance",
+          "text": "רוצים לראות אותי רוקד? זה החלק האהוב עליי.",
+          "motion": {"type": "emotion", "name": "cheerful1"},
+          "boss_cue": "ריצי, מה עוד אתה יודע לעשות?"
+        },
+        {
+          "id": "dance",
+          "hotkey": "0",
+          "label": "Dance (motion only)",
+          "motion": {"type": "dance", "name": "groovy_sway_and_roll"}
+        }
+      ]
+    },
+    {
+      "id": "handoff",
+      "title": "מעבר לשיחה חיה",
+      "cues": [
+        {
+          "id": "invite",
+          "hotkey": "a",
+          "label": "Invite someone to talk",
+          "text": "מי רוצה לדבר איתי? תתקרבו, קחו את המיקרופון, ותשאלו אותי מה שבא לכם.",
+          "motion": {"type": "emotion", "name": "welcoming2"},
+          "boss_cue": "מי רוצה לנסות לדבר איתו?"
+        },
+        {
+          "id": "hold_on",
+          "hotkey": "s",
+          "label": "SAVE: give me a second",
+          "text": "רגע, אני צריך שנייה לחשוב.",
+          "motion": {"type": "emotion", "name": "thoughtful2"},
+          "boss_cue": "(רשת איטית / ריצי לא עונה)"
+        },
+        {
+          "id": "say_again",
+          "hotkey": "d",
+          "label": "SAVE: didn't catch that",
+          "text": "לא שמעתי טוב, אפשר לחזור על זה?",
+          "motion": {"type": "emotion", "name": "inquiring2"},
+          "boss_cue": "(המיקרופון לא קלט)"
+        },
+        {
+          "id": "nice_to_meet",
+          "hotkey": "f",
+          "label": "SAVE: wrap up a chat",
+          "text": "היה ממש נעים לדבר איתך. תודה!",
+          "motion": {"type": "emotion", "name": "grateful1"},
+          "boss_cue": "(מסיימים את השיחה עם המתנדב)"
+        }
+      ]
+    },
+    {
+      "id": "closing",
+      "title": "סיום",
+      "cues": [
+        {
+          "id": "thanks",
+          "hotkey": "z",
+          "label": "Thank you",
+          "text": "תודה רבה לכם! היה לי ממש כיף. אני חוזר לשולחן שלי.",
+          "motion": {"type": "emotion", "name": "grateful1"},
+          "boss_cue": "ריצי, תודה שבאת אלינו"
+        },
+        {
+          "id": "final_sway",
+          "hotkey": "x",
+          "label": "Goodbye sway (motion only)",
+          "motion": {"type": "dance", "name": "side_to_side_sway"}
+        }
+      ]
+    }
+  ]
+}

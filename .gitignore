@@ -7,6 +7,9 @@ hf_token.txt.bak
 .env
 
 # === Local-only / generated ===
+# Cue audio is regenerated from show/cues.json by tools/build_show.py; the
+# cue file and the manifest ARE tracked, the ~4 MB of WAVs are not.
+show/audio/
 .venv/
 __pycache__/
 *.pyc
