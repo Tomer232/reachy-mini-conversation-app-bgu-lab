@@ -145,8 +145,7 @@ def _legacy_gemini_key() -> tuple:
     local_key = SCRIPT_DIR / ".gemini_key"
     if local_key.exists():
         return local_key.read_text(encoding="utf-8").strip(), ".gemini_key"
-    tomer_path = Path(
-        r"C:\Users\tomer\Desktop\job\reachy-mini\reachy-mini llm gemini token.txt")
+    tomer_path = SCRIPT_DIR.resolve().parent / "reachy-mini llm gemini token.txt"
     if tomer_path.exists():
         return tomer_path.read_text(encoding="utf-8").strip(), "local token file"
     return "", ""

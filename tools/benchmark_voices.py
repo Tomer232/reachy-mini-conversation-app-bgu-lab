@@ -22,7 +22,7 @@ def key():
     p = ROOT / ".gemini_key"
     if p.exists():
         return p.read_text().strip()
-    return Path(r"C:\Users\tomer\Desktop\job\reachy-mini\reachy-mini llm gemini token.txt").read_text().strip()
+    return (ROOT.parent / "reachy-mini llm gemini token.txt").read_text().strip()
 
 SYSTEM_PROMPT_HE = (
     "אתה Reachy Mini, רובוט שולחני קטן וידידותי. ענה תמיד בעברית. "

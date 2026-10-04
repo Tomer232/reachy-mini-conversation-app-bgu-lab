@@ -72,7 +72,7 @@ sudo systemctl restart reachy-mini-daemon
 ### Laptop
 
 ```powershell
-cd "C:\Users\tomer\Desktop\job\reachy-mini\reachy_chat"
+cd "$HOME\Desktop\job\reachy-mini\reachy_chat"
 .\.venv\Scripts\Activate.ps1
 pip install google-genai sounddevice paramiko soundfile scipy numpy silero-vad fastapi "uvicorn[standard]"
 ```
@@ -80,7 +80,7 @@ pip install google-genai sounddevice paramiko soundfile scipy numpy silero-vad f
 API key auto-resolution order:
 1. `GEMINI_API_KEY` env var
 2. `.gemini_key` next to `laptop_chat.py`
-3. `C:\Users\tomer\Desktop\job\reachy-mini\reachy-mini llm gemini token.txt`
+3. `reachy-mini llm gemini token.txt` in the `reachy-mini` folder above `reachy_chat`
 
 Robot host auto-resolution order:
 1. `--robot-host` CLI arg

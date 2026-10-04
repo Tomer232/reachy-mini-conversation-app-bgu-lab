@@ -515,16 +515,14 @@ _SENTINEL_NAMES = {
 # === API key resolution ============================================
 
 def get_api_key() -> str:
-    """env var, then local .gemini_key, then Tomer's known path."""
+    """env var, then local .gemini_key, then the token file in reachy-mini/."""
     key = os.environ.get("GEMINI_API_KEY")
     if key:
         return key.strip()
     local_key = SCRIPT_DIR / ".gemini_key"
     if local_key.exists():
         return local_key.read_text().strip()
-    tomer_path = Path(
-        r"C:\Users\tomer\Desktop\job\reachy-mini\reachy-mini llm gemini token.txt"
-    )
+    tomer_path = SCRIPT_DIR.resolve().parent / "reachy-mini llm gemini token.txt"
     if tomer_path.exists():
         return tomer_path.read_text().strip()
     sys.exit(

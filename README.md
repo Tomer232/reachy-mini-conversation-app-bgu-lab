@@ -128,7 +128,7 @@ is worth buying before the lecture. Until then:
 Open PowerShell and run these, in order.
 
 ```powershell
-cd "C:\Users\tomer\Desktop\job\reachy-mini\reachy_chat"
+cd "$HOME\Desktop\job\reachy-mini\reachy_chat"
 ```
 
 **Step 1 — check everything is ready.** Verifies the mic is actually sending

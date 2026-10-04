@@ -13,7 +13,7 @@ def key():
     k = os.environ.get("GEMINI_API_KEY")
     if k:
         return k.strip()
-    return Path(r"C:\Users\tomer\Desktop\job\reachy-mini\reachy-mini llm gemini token.txt").read_text().strip()
+    return (Path(__file__).resolve().parents[2] / "reachy-mini llm gemini token.txt").read_text().strip()
 
 client = genai.Client(api_key=key())
 print("=== Models with 'live' or 'audio' in name ===")

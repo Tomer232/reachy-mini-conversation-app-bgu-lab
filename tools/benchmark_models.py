@@ -48,7 +48,7 @@ def get_api_key() -> str:
     p = ROOT / ".gemini_key"
     if p.exists():
         return p.read_text().strip()
-    tomer = Path(r"C:\Users\tomer\Desktop\job\reachy-mini\reachy-mini llm gemini token.txt")
+    tomer = ROOT.parent / "reachy-mini llm gemini token.txt"
     return tomer.read_text().strip()
 
 
