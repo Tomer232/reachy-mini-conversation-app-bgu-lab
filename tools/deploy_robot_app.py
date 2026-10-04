@@ -55,6 +55,9 @@ FILES = [
     "providers/base.py",
     "providers/gemini.py",
     "providers/gpt_live.py",
+    "providers/elevenlabs_voice.py",
+    # The dashboard's backend picker (brain / language / ElevenLabs voice).
+    "backend.py",
     "vad.py",
     "vad_onnx.py",
     "local_transport.py",

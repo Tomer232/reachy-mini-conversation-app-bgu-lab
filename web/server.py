@@ -23,7 +23,9 @@ from system import (
     ConversationConflict,
     NotReady,
     InvalidSystemState,
+    StartRefused,
 )
+from providers import ProviderUnavailable
 from show_player import ShowError
 import show_editor
 from show_editor import ShowEditError
@@ -70,6 +72,9 @@ def create_app(manager: SystemManager, broadcaster) -> FastAPI:
         except NotReady as e:
             return JSONResponse(status_code=503,
                                 content={"error": "not_ready", "state": e.state})
+        except StartRefused as e:
+            return JSONResponse(status_code=400,
+                                content={"error": "refused", "detail": str(e)})
 
     @app.post("/api/conversation/end")
     async def api_end():
@@ -134,6 +139,34 @@ def create_app(manager: SystemManager, broadcaster) -> FastAPI:
     @app.post("/api/persona/reset")
     async def api_persona_reset():
         return manager.reset_persona()
+
+    # ----- the backend picker (brain / language / ElevenLabs voice) -----
+
+    @app.get("/api/backend")
+    async def api_backend():
+        return manager.backend_payload()
+
+    @app.put("/api/backend")
+    async def api_backend_update(body: dict = Body(...)):
+        """Only the fields sent move. Applies to the next conversation."""
+        allowed = ("brain", "language", "elevenlabs", "el_voice_id",
+                   "el_voice_name", "el_model")
+        changes = {k: body[k] for k in allowed if k in body}
+        if not changes:
+            return JSONResponse(
+                {"error": "nothing to change",
+                 "detail": f"send one or more of: {', '.join(allowed)}"},
+                status_code=400)
+        try:
+            return manager.set_backend(**changes)
+        except (ValueError, ProviderUnavailable) as e:
+            return JSONResponse({"error": "rejected", "detail": str(e)},
+                                status_code=400)
+
+    @app.get("/api/backend/elevenlabs/voices")
+    async def api_elevenlabs_voices(refresh: bool = False):
+        voices = await manager.elevenlabs_voices(refresh=refresh)
+        return {"voices": voices}
 
     @app.get("/api/show/cues")
     async def api_show_cues():

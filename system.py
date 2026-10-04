@@ -34,7 +34,9 @@ import httpx
 import credentials as creds_mod
 import identity as identity_mod
 import providers as providers_mod
+from backend import BackendStore, LANGUAGES
 from persona import PersonaStore
+from providers import elevenlabs_voice
 import conversation as conv_mod
 from conversation import (
     Conversation,
@@ -95,6 +97,12 @@ class InvalidSystemState(Exception):
         self.state = state
 
 
+class StartRefused(Exception):
+    """Start Conversation cannot go ahead with the chosen backend -- usually a
+    missing key. The message is for whoever is standing at the robot (HTTP
+    400, body {error: "refused", detail})."""
+
+
 class SystemManager:
     def __init__(self, broadcaster, robot_host: "str | None" = None,
                  robot_id: "str | None" = None,
@@ -125,9 +133,21 @@ class SystemManager:
         self.credential = None
         self.credential_error: str | None = None
 
+        # The dashboard's backend picker (backend.py). The launch provider
+        # above is the one whose key must exist for the robot to come up at
+        # all; the picker chooses per conversation, and a brain whose key is
+        # missing is refused at Start with a sentence, not at boot.
+        default_brain = next((b["id"] for b in providers_mod.BRAINS
+                              if b["provider"] == self.provider.name),
+                             providers_mod.DEFAULT_BRAIN)
+        self.backend = BackendStore(default_brain=default_brain)
+        self._clients: dict = {}
+        self._el_voices: "list | None" = None
+        self._el_voices_at = 0.0
+
         # The persona switch. Off by default; whatever was saved on this robot
         # is loaded here, which is what makes a persona survive a restart.
-        self.persona = PersonaStore(provider=self.provider.name)
+        self.persona = PersonaStore(provider=self._selected_provider().name)
 
         self.state = SystemState.STARTING
         self.vad: SileroVAD | None = None
@@ -266,6 +286,8 @@ class SystemManager:
             self.client = self.provider.make_client(self.credential)
         except Exception as e:
             return self._fatal(f"{self.provider.display_name} client init failed: {e}")
+        self._clients[self.provider.name] = self.client
+        self._broadcast({"event": "backend.change", **self.backend_payload()})
 
         # Robot mode uses the onnxruntime backend: the robot has no PyTorch and
         # is not getting it (~1 GB against ~3.7 GB free). tools/test_vad_parity.py
@@ -340,12 +362,16 @@ class SystemManager:
                 raise NotReady(self.state.name)
             assert self.client and self.vad and self.robot
 
+            # Settle the chosen backend before anything is created, so a
+            # missing key refuses the start instead of half-starting it.
+            spec, client = await self._prepare_session()
+
             convo_dir = ConversationDir()
             conv = Conversation(
-                self.client, self.vad, self.robot, convo_dir,
+                client, self.vad, self.robot, convo_dir,
                 on_transcript=self._on_transcript,
                 on_turn_aborted=self._on_turn_aborted,
-                session=self._session_spec(),
+                session=spec,
             )
             self.conversation = conv
             # Phase B: forward per-turn state transitions to the UI as
@@ -360,7 +386,9 @@ class SystemManager:
                 "event": "conversation.started",
                 "id": conv.id,
                 "dir": str(convo_dir.dir),
+                "backend": self._describe_spec(spec),
             })
+            log.info("Conversation on %s", self._describe_spec(spec))
             self._conv_task = asyncio.create_task(self._run_conversation(conv))
             return {"conversation_id": conv.id, "dir": str(convo_dir.dir)}
 
@@ -578,34 +606,187 @@ class SystemManager:
 
     # ----- the persona switch and what a session is built from -----
 
-    def _session_spec(self) -> SessionSpec:
-        """Freeze the current persona into the conversation about to start.
+    def _session_spec(self, provider=None, credential=None,
+                      voice_layer=None) -> SessionSpec:
+        """Freeze the current persona and backend choice into the conversation
+        about to start.
 
-        Read once, here. The switch can be flicked while a conversation runs —
-        it applies to the next one, and the dashboard says so.
+        Read once, here. The switches can be flicked while a conversation runs —
+        they apply to the next one, and the dashboard says so.
         """
         state = self.persona.state
+        choice = self.backend.state
+        brain = providers_mod.brain(choice.brain)
+        provider = provider or self._selected_provider()
+        credential = credential if credential is not None else self.credential
+        base_prompt, language_code = conv_mod.LANGUAGES.get(
+            choice.language, conv_mod.LANGUAGES[conv_mod.DEFAULT_LANGUAGE])
         return SessionSpec(
-            provider=self.provider,
-            system_prompt=self.persona.prompt_for(conv_mod.SYSTEM_PROMPT),
-            voice=self.persona.voice_for(self.provider.default_voice),
-            language=conv_mod.GEMINI_LANGUAGE_CODE,
-            model=self.provider.default_model,
+            provider=provider,
+            system_prompt=self.persona.prompt_for(base_prompt, choice.language),
+            voice=self.persona.voice_for(provider.default_voice),
+            language=language_code,
+            model=brain["model"],
             persona_summary=state.summary(),
             robot=self.identity.to_dict(),
-            credential=self.credential.public() if self.credential else {},
+            credential=credential.public() if credential else {},
+            voice_layer=voice_layer,
+            brain_id=brain["id"],
         )
+
+    # ----- the backend picker -----
+
+    def _selected_provider(self):
+        brain = providers_mod.brain(self.backend.state.brain)
+        if brain["provider"] == self.provider.name:
+            return self.provider
+        return providers_mod.get(brain["provider"])
+
+    def _credential_for(self, provider_name: str):
+        """The key for one provider. The launch provider's was settled at boot
+        (and may have come from the hub or --api-key); any other is looked up
+        fresh each time, so a key added to keys.json mid-session is picked up
+        without a restart. Raises creds_mod.NoCredential."""
+        if provider_name == self.provider.name and self.credential is not None:
+            return self.credential
+        return creds_mod.resolve(provider_name, use_hub=False)
+
+    _VENDOR = {creds_mod.GEMINI: ("Gemini", "GEMINI_API_KEY"),
+               creds_mod.GPT_LIVE: ("OpenAI", "OPENAI_API_KEY"),
+               creds_mod.ELEVENLABS: ("ElevenLabs", "ELEVENLABS_API_KEY")}
+
+    def _key_status(self, provider_name: str) -> dict:
+        try:
+            cred = self._credential_for(provider_name)
+        except creds_mod.NoCredential:
+            vendor, env = self._VENDOR.get(provider_name, (provider_name, "?"))
+            return {"ok": False,
+                    "error": f"No {vendor} key yet — add one to keys.json or set {env}"}
+        except Exception as e:
+            return {"ok": False, "error": str(e)}
+        return {"ok": True, "label": cred.label or cred.source,
+                "tail": cred.tail, "source": cred.source}
+
+    async def _prepare_session(self):
+        """(SessionSpec, client) for the backend currently chosen. Raises
+        StartRefused with a readable sentence on anything missing."""
+        choice = self.backend.state
+        brain = providers_mod.brain(choice.brain)
+        provider = self._selected_provider()
+        try:
+            credential = await asyncio.to_thread(self._credential_for, provider.name)
+        except creds_mod.NoCredential as e:
+            raise StartRefused("{}: {}".format(
+                brain["label"], self._key_status(provider.name).get("error") or e)) from e
+        client = self._clients.get(provider.name)
+        if client is None or provider.name != self.provider.name:
+            try:
+                client = provider.make_client(credential)
+            except Exception as e:
+                raise StartRefused(f"{brain['label']} client failed: {e}") from e
+            self._clients[provider.name] = client
+
+        voice_layer = None
+        if choice.elevenlabs:
+            try:
+                el_cred = await asyncio.to_thread(
+                    self._credential_for, creds_mod.ELEVENLABS)
+            except creds_mod.NoCredential as e:
+                raise StartRefused("ElevenLabs voice is on, but: {}".format(
+                    self._key_status(creds_mod.ELEVENLABS).get("error") or e)) from e
+            voice_id, voice_name = choice.el_voice_id, choice.el_voice_name
+            if not voice_id:
+                voices = await self.elevenlabs_voices()
+                if not voices:
+                    raise StartRefused(
+                        "ElevenLabs voice is on, but no voice is chosen and the "
+                        "account's voice list could not be read")
+                voice_id, voice_name = voices[0]["voice_id"], voices[0]["name"]
+            voice_layer = elevenlabs_voice.ElevenLabsVoice(
+                el_cred.key, voice_id, choice.el_model, voice_name)
+
+        spec = self._session_spec(provider=provider, credential=credential,
+                                  voice_layer=voice_layer)
+        return spec, client
+
+    @staticmethod
+    def _describe_spec(spec: SessionSpec) -> str:
+        brain = providers_mod.brain(spec.brain_id) if spec.brain_id else {}
+        voice = (spec.voice_layer.describe() if spec.voice_layer is not None
+                 else f"{spec.provider.display_name} voice {spec.voice}")
+        return "{} · {} · {}".format(brain.get("label", spec.model),
+                                     spec.language, voice)
+
+    async def elevenlabs_voices(self, refresh: bool = False) -> list:
+        """The ElevenLabs account's voices, cached for ten minutes. Empty when
+        there is no key or the list cannot be read (the reason is logged)."""
+        if (not refresh and self._el_voices is not None
+                and time.time() - self._el_voices_at < 600):
+            return self._el_voices
+        try:
+            cred = await asyncio.to_thread(self._credential_for, creds_mod.ELEVENLABS)
+            voices = await asyncio.to_thread(elevenlabs_voice.list_voices, cred.key)
+        except Exception as e:
+            log.warning("ElevenLabs voice list unavailable: %s", e)
+            return self._el_voices or []
+        self._el_voices = voices
+        self._el_voices_at = time.time()
+        return voices
+
+    def backend_payload(self) -> dict:
+        """Everything the backend picker renders."""
+        choice = self.backend.state
+        brains = []
+        for b in providers_mod.BRAINS:
+            key = self._key_status(b["provider"])
+            note = ""
+            if b["provider"] == "gpt_live":
+                note = ("Hebrew is unverified on GPT-Live (OpenAI publishes no "
+                        "language list). No motion tools: it talks and sways only.")
+            brains.append({**b, "key_ok": key["ok"],
+                           "key_error": key.get("error", ""),
+                           "key_label": key.get("label", ""),
+                           "key_tail": key.get("tail", ""),
+                           "note": note})
+        el_key = self._key_status(creds_mod.ELEVENLABS)
+        return {
+            "brain": choice.brain,
+            "brains": brains,
+            "language": choice.language,
+            "languages": list(LANGUAGES),
+            "elevenlabs": {
+                "enabled": choice.elevenlabs,
+                "key_ok": el_key["ok"],
+                "key_error": el_key.get("error", ""),
+                "voice_id": choice.el_voice_id,
+                "voice_name": choice.el_voice_name,
+                "model": choice.el_model,
+                "models": list(elevenlabs_voice.MODELS),
+            },
+            "applies_next": self.state == SystemState.CONVERSATION_RUNNING,
+        }
+
+    def set_backend(self, **changes) -> dict:
+        self.backend.update(**changes)
+        # The persona panel's voice list follows the brain's provider.
+        self.persona.provider = self._selected_provider().name
+        payload = self.backend_payload()
+        self._broadcast({"event": "backend.change", **payload})
+        self._broadcast({"event": "persona.change", **self.persona_payload()})
+        self._broadcast({"event": "identity.change", **self.identity_payload()})
+        return payload
 
     def persona_payload(self) -> dict:
         """Everything the persona panel renders, in one place so the REST
         route and the WS snapshot can never drift apart."""
         state = self.persona.state
-        payload = state.public(self.provider.name)
+        provider = self._selected_provider()
+        payload = state.public(provider.name)
         payload["presets"] = self.persona.presets()
         payload["voices"] = self.persona.voices()
-        payload["default_voice"] = self.provider.default_voice
-        payload["provider"] = self.provider.name
-        payload["provider_display"] = self.provider.display_name
+        payload["default_voice"] = provider.default_voice
+        payload["provider"] = provider.name
+        payload["provider_display"] = provider.display_name
         payload["summary"] = state.summary()
         payload["active"] = state.is_active
         # True while a conversation is running: the panel uses it to say that
@@ -626,16 +807,32 @@ class SystemManager:
         return payload
 
     def identity_payload(self) -> dict:
-        """Who this robot is and what it is talking through. Never the key."""
+        """Who this robot is and what it is talking through. Never the key.
+
+        "What it is talking through" is the brain chosen for the next
+        conversation, which is not always the provider it was launched on.
+        """
+        brain = providers_mod.brain(self.backend.state.brain)
+        provider = self._selected_provider()
+        if provider.name == self.provider.name:
+            key = (self.credential.public() if self.credential
+                   else {"error": self.credential_error or "not resolved yet"})
+        else:
+            try:
+                key = self._credential_for(provider.name).public()
+            except Exception as e:
+                key = {"error": str(e)}
+        display = brain["label"]
+        if self.backend.state.elevenlabs:
+            display += " + ElevenLabs voice"
         return {
             "robot": self.identity.to_dict(),
             "provider": {
-                "name": self.provider.name,
-                "display_name": self.provider.display_name,
-                "implemented": self.provider.implemented,
+                "name": provider.name,
+                "display_name": display,
+                "implemented": provider.implemented,
             },
-            "key": (self.credential.public() if self.credential
-                    else {"error": self.credential_error or "not resolved yet"}),
+            "key": key,
         }
 
     def status(self) -> dict:
@@ -654,6 +851,7 @@ class SystemManager:
             "conversation": conv_info,
             "identity": self.identity_payload(),
             "persona": self.persona_payload(),
+            "backend": self.backend_payload(),
         }
 
     def snapshot(self) -> dict:

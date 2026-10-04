@@ -43,6 +43,11 @@
     personaMsg: $("persona-msg"),
     personaHint: $("persona-hint"),
     personaCount: $("persona-count"),
+    backendBrain: $("backend-brain"),
+    backendLanguage: $("backend-language"),
+    backendEl: $("backend-el"),
+    backendElVoice: $("backend-el-voice"),
+    backendMsg: $("backend-msg"),
   };
 
   let currentState = "STARTING";
@@ -229,6 +234,16 @@
     maybeScroll(el.chat, wasBottom);
   }
 
+  function appendSystemLine(text) {
+    const wasBottom = stick(el.chat);
+    const line = document.createElement("div");
+    line.className = "text-center text-xs text-slate-500 bubble-in py-1";
+    line.setAttribute("dir", "auto");
+    line.textContent = text;
+    el.chat.appendChild(line);
+    maybeScroll(el.chat, wasBottom);
+  }
+
   function renderTranscriptEntry(t) {
     if (t.role === "user") appendUser(t.turn_id, t.text);
     else if (t.role === "robot") appendRobot(t.turn_id, t.text);
@@ -277,7 +292,24 @@
       appendLogLine("ERROR", "client", label + " request error: " + e);
     }
   }
-  async function startConversation() { el.actionBtn.disabled = true; await post("/api/conversation/start", "start"); }
+  async function startConversation() {
+    el.actionBtn.disabled = true;
+    try {
+      const r = await fetch("/api/conversation/start", { method: "POST" });
+      if (!r.ok) {
+        const body = await r.json().catch(() => ({}));
+        // A refused start (missing key, ...) is a sentence for the person at
+        // the robot: put it by the picker, not only in the log.
+        const why = body.detail || JSON.stringify(body);
+        backendMessage("Could not start: " + why, "error");
+        appendLogLine("ERROR", "client", "start failed: " + why);
+        updateButtons(currentState);
+      }
+    } catch (e) {
+      appendLogLine("ERROR", "client", "start request error: " + e);
+      updateButtons(currentState);
+    }
+  }
   async function endConversation() { el.actionBtn.disabled = true; await post("/api/conversation/end", "end"); }
   async function startSystem() {
     el.startSystemBtn.disabled = true; el.stopSystemBtn.disabled = true;
@@ -345,6 +377,7 @@
         setRobot(m.robot);
         setIdentity(m.identity);
         setPersona(m.persona);
+        setBackend(m.backend);
         if (m.conversation) {
           setConversationHeader(m.conversation.id);
           el.convTurns.textContent = m.conversation.turn_count != null ? m.conversation.turn_count : 0;
@@ -375,6 +408,16 @@
         setConversationHeader(m.id);
         el.convTurns.textContent = "0";
         el.sessionBody.classList.remove("opacity-50");
+        if (m.backend) {
+          appendSystemLine(m.backend);
+          appendLogLine("INFO", "client", "conversation on " + m.backend);
+        }
+        break;
+      case "backend.change":
+        setBackend(m);
+        break;
+      case "identity.change":
+        setIdentity(m);
         break;
       case "conversation.ended":
         appendLogLine("INFO", "client", "conversation ended (" + m.reason + ")");
@@ -595,6 +638,106 @@
     }
   };
 
+  // ---- backend picker (brain / language / ElevenLabs voice) -----------
+
+  let backendState = null;
+  let elVoicesLoaded = false;
+
+  function backendMessage(text, tone) {
+    el.backendMsg.textContent = text || "";
+    el.backendMsg.className = "text-xs " + (
+      tone === "error" ? "text-red-600" :
+      tone === "warn" ? "text-amber-700" :
+      tone === "ok" ? "text-green-700" : "text-slate-500");
+  }
+
+  function setBackend(b) {
+    if (!b || !b.brains) return;
+    backendState = b;
+    fillOptions(el.backendBrain,
+      b.brains.map((x) => ({
+        value: x.id,
+        label: x.label + (x.key_ok ? "" : "  — no key"),
+      })), b.brain);
+    fillOptions(el.backendLanguage,
+      (b.languages || []).map((x) => ({ value: x.id, label: x.label })),
+      b.language);
+    const elv = b.elevenlabs || {};
+    el.backendEl.checked = !!elv.enabled;
+    el.backendElVoice.classList.toggle("hidden", !elv.enabled);
+    if (elv.enabled && !elVoicesLoaded) loadElVoices(false);
+    else if (elv.enabled) el.backendElVoice.value = elv.voice_id || "";
+    describeBackend();
+  }
+
+  // The honest line under the picker: what the next conversation will be,
+  // and anything that would stop it or surprise you.
+  function describeBackend() {
+    const b = backendState;
+    if (!b) return;
+    const brain = b.brains.find((x) => x.id === b.brain) || {};
+    const elv = b.elevenlabs || {};
+    const problems = [];
+    if (!brain.key_ok) problems.push(brain.key_error || "no key for this brain");
+    if (elv.enabled && !elv.key_ok) problems.push("ElevenLabs: " + (elv.key_error || "no key"));
+    if (problems.length) { backendMessage(problems.join(" · "), "error"); return; }
+    const notes = [];
+    if (brain.note) notes.push(brain.note);
+    if (b.applies_next) notes.push("Applies to the next conversation.");
+    backendMessage(notes.join(" "), brain.note ? "warn" : "");
+  }
+
+  async function loadElVoices(refresh) {
+    try {
+      const r = await fetch("/api/backend/elevenlabs/voices" + (refresh ? "?refresh=true" : ""));
+      const data = await r.json();
+      const voices = data.voices || [];
+      const cur = (backendState && backendState.elevenlabs) || {};
+      fillOptions(el.backendElVoice,
+        voices.map((v) => ({
+          value: v.voice_id,
+          label: v.name + (v.language ? " (" + v.language + ")" : ""),
+        })),
+        cur.voice_id || "",
+        voices.length ? "First voice in the account" : "No voices (check the key)");
+      elVoicesLoaded = voices.length > 0;
+    } catch (e) {
+      backendMessage("Could not load the ElevenLabs voices.", "error");
+    }
+  }
+
+  async function sendBackend(body) {
+    try {
+      const r = await fetch("/api/backend", {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+      });
+      const data = await r.json();
+      if (!r.ok) { backendMessage(data.detail || "Could not change that.", "error"); return null; }
+      setBackend(data);
+      return data;
+    } catch (e) {
+      backendMessage("Could not reach the robot.", "error");
+      return null;
+    }
+  }
+
+  el.backendBrain.onchange = () => sendBackend({ brain: el.backendBrain.value });
+  el.backendLanguage.onchange = () => sendBackend({ language: el.backendLanguage.value });
+  el.backendEl.onchange = () => sendBackend({ elevenlabs: el.backendEl.checked });
+  el.backendElVoice.onchange = () => {
+    const opt = el.backendElVoice.selectedOptions[0];
+    sendBackend({
+      el_voice_id: el.backendElVoice.value,
+      el_voice_name: el.backendElVoice.value && opt ? opt.textContent : "",
+    });
+  };
+
+  async function loadBackend() {
+    try { setBackend(await (await fetch("/api/backend")).json()); } catch (e) { /* WS snapshot has it too */ }
+  }
+
   function connect() {
     const proto = location.protocol === "https:" ? "wss" : "ws";
     const ws = new WebSocket(proto + "://" + location.host + "/ws");
@@ -611,5 +754,6 @@
   el.copyLogsBtn.onclick = copyLogs;
 
   loadPersona();
+  loadBackend();
   connect();
 })();

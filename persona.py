@@ -63,6 +63,14 @@ INVARIANTS_HE = (
     "שמור על תשובות קצרות של משפט או שניים, "
     "והשתמש בכלי תנועה אחד לכל היותר בכל תשובה."
 )
+# The same reminder for the dashboard's English setting. Restating "answer in
+# Hebrew" after an English base prompt would be the overlay arguing with it.
+INVARIANTS_EN = (
+    "Important, even with the character above: always answer in English, "
+    "keep replies to a sentence or two, and use at most one movement tool "
+    "per reply."
+)
+INVARIANTS = {"he": INVARIANTS_HE, "en": INVARIANTS_EN}
 
 # Voices, per provider.
 #
@@ -160,7 +168,7 @@ class PersonaState:
 
     # ----- what the model actually receives -----
 
-    def effective_prompt(self, base: str) -> str:
+    def effective_prompt(self, base: str, language: str = "he") -> str:
         """base, when the switch is off. base + overlay + invariants when on.
 
         The order is the whole design: the working instructions cannot be
@@ -169,7 +177,8 @@ class PersonaState:
         overlay = _clean(self.overlay)
         if not self.enabled or not overlay:
             return base
-        return "{}\n\n{}\n\n{}".format(base.strip(), overlay, INVARIANTS_HE)
+        return "{}\n\n{}\n\n{}".format(base.strip(), overlay,
+                                       INVARIANTS.get(language, INVARIANTS_HE))
 
     def effective_voice(self, default: str) -> str:
         if not self.enabled or not self.voice:
@@ -352,11 +361,15 @@ class PersonaStore:
 
     # ----- what the session builder asks for -----
 
-    def prompt_for(self, base: str) -> str:
-        return self.state.effective_prompt(base)
+    def prompt_for(self, base: str, language: str = "he") -> str:
+        return self.state.effective_prompt(base, language)
 
     def voice_for(self, default: str) -> str:
-        return self.state.effective_voice(default)
+        """The persona's voice -- unless it belongs to another provider (the
+        dashboard can switch backends under a saved persona), in which case
+        the provider's default."""
+        voice = self.state.effective_voice(default)
+        return voice if voice in self.voices() else default
 
 
 def write_default_presets(path: Path = PRESETS_PATH) -> bool:

@@ -26,6 +26,28 @@ Phase 0 spike will have said whether it is worth building.
 
 Naming the limit is the point. A seam that claims to abstract something it
 does not is worse than no seam, because the next person builds on the claim.
+
+**How the other backends fit through it anyway (2026-10).** Rather than
+rewrite the turn loop around a neutral event stream with no robot to prove the
+rewrite on, a non-Gemini session *impersonates* a Gemini session: the turn loop
+keeps calling `send_realtime_input`, iterating `receive()` and reading
+`server_content` / `tool_call` off what it yields, and the adapter translates.
+That keeps the Gemini path byte-for-byte what it was. What a session must look
+like to the turn loop is exactly this, and nothing more:
+
+    await session.send_realtime_input(audio=<Blob with .data>)   # one turn
+    await session.send_realtime_input(audio_stream_end=True)
+    async for resp in session.receive():                          # until
+        resp.tool_call / resp.tool_call_cancellation              # turn_complete
+        resp.server_content.model_turn.parts[i].inline_data.data  # 24 kHz PCM16
+        resp.server_content.input_transcription.text
+        resp.server_content.output_transcription.text
+        resp.server_content.turn_complete
+    await session.send_tool_response(function_responses=[...])
+
+plus one optional hook: `session.mic_streamer()`, returning a callable the mic
+capture feeds every 16 kHz frame to, for a backend that must hear the user
+live rather than receive the turn afterwards (gpt-live-1 does).
 """
 
 from __future__ import annotations
@@ -66,12 +88,22 @@ class SpeechProvider(ABC):
 
     @abstractmethod
     def build_config(self, *, system_prompt: str, voice: str,
-                     language: str, tools: Optional[list] = None) -> Any:
+                     language: str, tools: Optional[list] = None,
+                     model: str = "") -> Any:
         """The provider-native session config.
 
         `system_prompt` arrives already layered by the persona switch; a
-        provider must pass it through untouched.
+        provider must pass it through untouched. `model` matters where two
+        models of one provider need different settings (Gemini 3.8 vs 3.1).
         """
+
+    def turn_tail_pad_s(self, model: str = "") -> float:
+        """Seconds of silence to append to each turn's audio before sending.
+
+        Zero means "send the recording as captured", which is what every
+        provider did before this existed.
+        """
+        return 0.0
 
     @abstractmethod
     def connect(self, client: Any, config: Any, model: Optional[str] = None):
@@ -95,3 +127,32 @@ class SpeechProvider(ABC):
         conservative: unknown means no, because the cost of finding out during
         a demo is a robot that answers a Hebrew question in English."""
         return True
+
+
+# ----- impersonating the Gemini SDK's response objects -----
+#
+# The adapters (gpt_live.py, elevenlabs_voice.py) hand the turn loop objects
+# that read like google.genai's LiveServerMessage. Only the attributes the
+# turn loop actually touches exist; see the contract in the module docstring.
+
+from types import SimpleNamespace as _NS
+
+
+def gemini_like(audio: Optional[bytes] = None, user_text: Optional[str] = None,
+                robot_text: Optional[str] = None, turn_complete: bool = False,
+                interrupted: bool = False) -> Any:
+    """One server message in the shape `drain_one_turn_streaming` reads."""
+    model_turn = None
+    if audio:
+        model_turn = _NS(parts=[_NS(inline_data=_NS(data=audio))])
+    return _NS(
+        tool_call=None,
+        tool_call_cancellation=None,
+        server_content=_NS(
+            model_turn=model_turn,
+            input_transcription=_NS(text=user_text) if user_text else None,
+            output_transcription=_NS(text=robot_text) if robot_text else None,
+            turn_complete=turn_complete,
+            interrupted=interrupted,
+        ),
+    )

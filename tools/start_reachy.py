@@ -402,6 +402,23 @@ def start_laptop_mode(ip: str) -> str:
     return f"Laptop mode starting (pid {proc.pid}). The dashboard will open."
 
 
+def _key_exports() -> str:
+    """`export NAME=key; ` for every provider key this laptop has, so the
+    robot's dashboard can offer the same backends the laptop's would."""
+    import shlex
+    import credentials
+    out = []
+    for provider, env in ((credentials.GEMINI, "GEMINI_API_KEY"),
+                          (credentials.GPT_LIVE, "OPENAI_API_KEY"),
+                          (credentials.ELEVENLABS, "ELEVENLABS_API_KEY")):
+        try:
+            key = credentials.resolve(provider, use_hub=False).key
+        except Exception:
+            continue
+        out.append("export {}={}; ".format(env, shlex.quote(key)))
+    return "".join(out)
+
+
 def start_robot_mode(ip: str) -> str:
     """Sync the code, start the app on the robot, wait for it to answer."""
     # Always sync first. It is incremental (unchanged files are skipped), and
@@ -419,8 +436,11 @@ def start_robot_mode(ip: str) -> str:
         raise RuntimeError(
             f"deploy failed:\n{dep.stdout[-800:]}\n{dep.stderr[-400:]}")
 
-    # setsid so the app outlives this SSH session.
-    cmd = (f"cd {ROBOT_APP_DIR} && "
+    # setsid so the app outlives this SSH session. The API keys travel in the
+    # app's environment, the way robot-hub hands them over: nothing is
+    # written to the robot's disk (2026-09-24). Without this, robot mode
+    # started from here had no key at all once .gemini_key was removed.
+    cmd = (f"cd {ROBOT_APP_DIR} && {_key_exports()}"
            f"setsid nohup {ROBOT_PYTHON} laptop_chat.py --local-robot "
            f"--host 0.0.0.0 --no-browser > {ROBOT_LOG} 2>&1 < /dev/null & "
            f"echo started")

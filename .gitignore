@@ -30,3 +30,7 @@ archive/
 robot_identity.json
 persona.json
 show/backups/
+
+# === Per-laptop choices and secrets written by the dashboard ===
+keys.json
+backend.json

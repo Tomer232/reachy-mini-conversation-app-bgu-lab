@@ -45,10 +45,15 @@ KEYS_PATH = SCRIPT_DIR / "keys.json"
 
 GEMINI = "gemini"
 GPT_LIVE = "gpt_live"
-PROVIDERS = (GEMINI, GPT_LIVE)
+# Not a speech backend: the optional voice that can replace either backend's
+# own (providers/elevenlabs_voice.py). It still needs a key, and the key lives
+# wherever the other two live, so it is resolved the same way.
+ELEVENLABS = "elevenlabs"
+PROVIDERS = (GEMINI, GPT_LIVE, ELEVENLABS)
 
 # The env var each provider falls back to when no registry entry applies.
-_ENV_FALLBACK = {GEMINI: "GEMINI_API_KEY", GPT_LIVE: "OPENAI_API_KEY"}
+_ENV_FALLBACK = {GEMINI: "GEMINI_API_KEY", GPT_LIVE: "OPENAI_API_KEY",
+                 ELEVENLABS: "ELEVENLABS_API_KEY"}
 
 # Set by robot-hub at launch; see resolve().
 HUB_KEY_ENV = "REACHY_HUB_KEY"
@@ -154,13 +159,20 @@ def _legacy_gemini_key() -> tuple:
 def resolve(provider: Optional[str] = None,
             key_id: Optional[str] = None,
             literal_key: Optional[str] = None,
-            path: Path = KEYS_PATH) -> Credential:
+            path: Path = KEYS_PATH,
+            use_hub: bool = True) -> Credential:
     """Settle this instance's credential.
 
     `key_id` names a registry entry (and then decides the provider, unless one
     was given explicitly and disagrees -- which is an error worth raising, not
     papering over). Without one, the registry's first entry for the provider
     wins, then the environment.
+
+    `use_hub=False` skips the hub's key. The hub assigns one key for the
+    provider the robot was *launched* on; once the dashboard can switch
+    backends per conversation, handing that same key to a different provider
+    would send a Gemini key to OpenAI. The caller knows which provider was
+    launched, so the caller decides.
     """
     provider = (provider or GEMINI).strip().lower()
     if provider not in PROVIDERS:
@@ -176,7 +188,7 @@ def resolve(provider: Optional[str] = None,
     # The hub owns the keys (Tomer, 2026-09-24): it pipes the assigned one into
     # this process's environment at launch, so no copy lives on the robot's
     # disk and none appears in a process list. It outranks everything stored.
-    hub_key = os.environ.get(HUB_KEY_ENV, "").strip()
+    hub_key = os.environ.get(HUB_KEY_ENV, "").strip() if use_hub else ""
     if hub_key:
         return Credential(provider=provider, key=hub_key,
                           key_id=os.environ.get(HUB_KEY_ID_ENV, ""),

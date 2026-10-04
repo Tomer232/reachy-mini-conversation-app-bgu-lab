@@ -1,8 +1,14 @@
-"""Speech backends, one per file, chosen at launch by `--provider`.
+"""Speech backends, one per file.
 
-    providers/base.py       the contract, and what it deliberately leaves out
-    providers/gemini.py     the working path, moved not rewritten
-    providers/gpt_live.py   the seat at the table; gated on the Hebrew spike
+    providers/base.py             the contract, and what it deliberately leaves out
+    providers/gemini.py           Gemini Live (3.8 and the proven 3.1)
+    providers/gpt_live.py         OpenAI gpt-live-1, adapted to the turn loop
+    providers/elevenlabs_voice.py not a backend: an optional voice that replaces
+                                  whichever backend is thinking
+
+A *provider* is a vendor and its client. A *brain* is what the dashboard's
+dropdown offers: a provider plus a model. Two Gemini brains share one provider
+and one key, which is why the dropdown is a list of brains, not of providers.
 """
 
 from __future__ import annotations
@@ -18,6 +24,30 @@ _PROVIDERS = {
 
 DEFAULT_PROVIDER = GeminiProvider.name
 
+# What the dashboard dropdown offers, in the order it offers it. `id` is what
+# the browser sends back and what backend.json stores.
+BRAINS = (
+    {"id": "gemini-3.8", "provider": "gemini", "model": "gemini-3.8-live",
+     "label": "Gemini 3.8 Live"},
+    {"id": "gemini-3.1", "provider": "gemini",
+     "model": "gemini-3.1-flash-live-preview",
+     "label": "Gemini 3.1 Flash Live (previous)"},
+    {"id": "gpt-live-1", "provider": "gpt_live", "model": "gpt-live-1",
+     "label": "OpenAI GPT-Live-1"},
+)
+DEFAULT_BRAIN = "gemini-3.8"
+
+
+def brain(brain_id: str = "") -> dict:
+    """One dropdown entry by id. Unknown ids name the alternatives."""
+    key = (brain_id or DEFAULT_BRAIN).strip().lower()
+    for entry in BRAINS:
+        if entry["id"] == key:
+            return dict(entry)
+    raise ProviderUnavailable(
+        "'{}' is not a brain this app has (it has {})".format(
+            brain_id, ", ".join(b["id"] for b in BRAINS)))
+
 
 def get(name: str = "") -> SpeechProvider:
     """One provider instance by name. Unknown names name the alternatives."""
@@ -30,22 +60,5 @@ def get(name: str = "") -> SpeechProvider:
     return cls()
 
 
-def available() -> list:
-    """Every provider, with whether it is actually built. The dashboard shows
-    the unbuilt ones rather than hiding them, so the roadmap is visible where
-    the decision is made."""
-    out = []
-    for key in sorted(_PROVIDERS):
-        p = _PROVIDERS[key]()
-        out.append({
-            "name": p.name,
-            "display_name": p.display_name,
-            "implemented": p.implemented,
-            "voices": list(p.voices),
-            "default_voice": p.default_voice,
-        })
-    return out
-
-
-__all__ = ["SpeechProvider", "ProviderUnavailable", "GeminiProvider",
-           "GptLiveProvider", "get", "available", "DEFAULT_PROVIDER"]
+__all__ = ["BRAINS", "DEFAULT_BRAIN", "DEFAULT_PROVIDER", "ProviderUnavailable",
+           "SpeechProvider", "brain", "get"]

@@ -39,6 +39,51 @@ a participant cannot accidentally take the robot out of Hebrew or break its
 motion tools. A persona survives a restart, and the dashboard always shows
 what is actually running.
 
+## Choosing the brain, the language and the voice
+
+Above **Start Conversation** there is a small picker. Like the persona, it
+applies to the *next* conversation and survives a restart (`backend.json`).
+
+| Control | Options |
+|---|---|
+| Brain | **Gemini 3.8 Live** (default, Google's current model) · Gemini 3.1 Flash Live (previous) · **OpenAI GPT-Live-1** |
+| Language | עברית · English |
+| ElevenLabs v4 voice | Off, or on with a voice from the ElevenLabs account. The brain still listens, thinks and gestures; the robot speaks with ElevenLabs (`eleven_v4_turbo`). If ElevenLabs cannot be reached, that turn falls back to the brain's own voice and the log says why. |
+
+**Keys.** Gemini's is found as before. OpenAI and ElevenLabs go in
+`keys.json` next to this file (git-ignored), or in `OPENAI_API_KEY` /
+`ELEVENLABS_API_KEY`:
+
+```json
+{"keys": [
+  {"id": "openai",     "provider": "gpt_live",   "label": "OpenAI",     "key": "sk-..."},
+  {"id": "elevenlabs", "provider": "elevenlabs", "label": "ElevenLabs", "key": "..."}
+]}
+```
+
+A brain without a key says so in the dropdown, and Start refuses with a
+sentence rather than half-starting. Keys are read when Start is pressed, so a
+key added mid-session works without a restart. In robot mode the launcher
+passes every key the laptop has into the robot app's environment.
+
+**GPT-Live-1 is different in kind**, and it is worth knowing how before the
+test (details in `providers/gpt_live.py`): it hears you live while you speak
+and decides itself when you have finished; it has no motion tools (the robot
+still sways to its own speech); and **its Hebrew is unverified** — OpenAI
+publishes no language list and all its voices are English or Portuguese.
+
+**Test without the robot first.**
+
+```powershell
+.venv\Scripts\python.exe tools\check_backends.py          # every combination you have keys for
+.venv\Scripts\python.exe tools\dry_run.py                 # the real dashboard; laptop mic + speakers are the robot
+```
+
+`check_backends.py` holds a three-turn conversation on each brain × language
+(× ElevenLabs) from recorded speech and prints PASS/FAIL with what was heard,
+what was said and the latency. `tools/test_fake_backends.py` exercises the
+GPT-Live and ElevenLabs plumbing against local stand-ins, needing no keys.
+
 ## The microphone, and what is not yet measured
 
 The robot's built-in microphone is what listens now. **The K11 lavalier is no

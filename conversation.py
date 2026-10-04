@@ -123,6 +123,26 @@ SYSTEM_PROMPT = (
     "השתמש בכלי אחד לכל היותר בכל תשובה."
 )
 
+# The English counterpart, for the dashboard's language switch. Same rules in
+# the same order -- a different language, not a different robot.
+SYSTEM_PROMPT_EN = (
+    "You are Reachy Mini, a small, friendly desktop robot. Always answer in "
+    "English. Keep replies short, one or two sentences. Be warm and curious. "
+    "If the user says they want to end the conversation, say a short, warm "
+    "goodbye. "
+    "You can perform movements and emotions during the conversation. Use the "
+    "play_emotion, dance and move_head tools when it fits -- not in every "
+    "sentence. The right movement at the right moment lifts the interaction. "
+    "Use at most one tool per reply."
+)
+
+# language id (the dashboard's) -> (base prompt, BCP-47 code)
+LANGUAGES = {
+    "he": (SYSTEM_PROMPT, "he-IL"),
+    "en": (SYSTEM_PROMPT_EN, "en-US"),
+}
+DEFAULT_LANGUAGE = "he"
+
 END_PHRASES = (
     # Hebrew
     "סיים שיחה",
@@ -748,7 +768,9 @@ def _downsample_for_vad(samples_int16: np.ndarray, decim: int) -> np.ndarray:
 
 def record_with_vad(vad: "SileroVAD",
                     robot: "StreamingRobotPlayer | None" = None,
-                    should_stop: "threading.Event | None" = None) -> np.ndarray:
+                    should_stop: "threading.Event | None" = None,
+                    on_frame: "Callable[[np.ndarray], None] | None" = None,
+                    ) -> np.ndarray:
     """Record from default mic using Silero-VAD endpointing.
 
     Per-frame: feed 32 ms (512-sample) int16 chunks into Silero, get a
@@ -766,6 +788,11 @@ def record_with_vad(vad: "SileroVAD",
     array immediately so a long mic wait doesn't delay an End-Conversation
     click. Runs on a worker thread (asyncio.to_thread), so it must not block
     the event loop and must be promptly interruptible.
+
+    `on_frame`: optional tap that receives every 32 ms frame as int16 at
+    16 kHz, the moment it is captured, from mic open to return. None (the
+    Gemini path) changes nothing. gpt-live-1 sets it, because it must hear the
+    user live -- it decides for itself when they have finished.
     """
     # Clear the model's LSTM state — otherwise the tail of the prior
     # turn (or the bot's own audio that leaked into the mic) can bleed
@@ -868,6 +895,15 @@ def record_with_vad(vad: "SileroVAD",
                 # per-frame resampler output.
                 audio_frames.append(chunk)
                 vad_samples = _downsample_for_vad(samples, _decim)
+                if on_frame is not None:
+                    try:
+                        on_frame(vad_samples if vad_samples.dtype == np.int16
+                                 else np.clip(vad_samples * 32768.0, -32768.0,
+                                              32767.0).astype(np.int16))
+                    except Exception:
+                        # A streaming hiccup must never cost the recording.
+                        log_capture.exception("on_frame tap failed")
+                        on_frame = None
                 try:
                     prob = vad.feed_frame(vad_samples)
                 except Exception:
@@ -1453,13 +1489,15 @@ class SessionSpec:
     """
 
     __slots__ = ("provider", "system_prompt", "voice", "language", "model",
-                 "persona_summary", "robot", "credential")
+                 "persona_summary", "robot", "credential", "voice_layer",
+                 "brain_id")
 
     def __init__(self, provider=None, system_prompt: "str | None" = None,
                  voice: str = "", language: str = "", model: str = "",
                  persona_summary: str = "base",
                  robot: "dict | None" = None,
-                 credential: "dict | None" = None):
+                 credential: "dict | None" = None,
+                 voice_layer=None, brain_id: str = ""):
         import providers as _providers
         self.provider = provider if provider is not None else _providers.get("gemini")
         self.system_prompt = (system_prompt if system_prompt is not None
@@ -1470,22 +1508,53 @@ class SessionSpec:
         self.persona_summary = persona_summary
         self.robot = robot or {}
         self.credential = credential or {}
+        # Optional replacement voice (providers/elevenlabs_voice.py). None is
+        # the backend speaking with its own voice, as it always has.
+        self.voice_layer = voice_layer
+        self.brain_id = brain_id
 
     def build_config(self):
         return build_live_config(self.provider, self.system_prompt,
-                                 self.voice, self.language)
+                                 self.voice, self.language, model=self.model)
+
+    @property
+    def tail_pad_s(self) -> float:
+        return float(self.provider.turn_tail_pad_s(self.model))
+
+    def open_session(self, client):
+        """The live session the turn loop talks to: the provider's own, with
+        the replacement voice layered on top when one is set. With no voice
+        layer this is exactly `provider.connect(...)`."""
+        import contextlib
+
+        @contextlib.asynccontextmanager
+        async def _open():
+            async with self.provider.connect(client, self.build_config(),
+                                             self.model) as session:
+                if self.voice_layer is None:
+                    yield session
+                else:
+                    async with self.voice_layer.wrap(session) as voiced:
+                        yield voiced
+        return _open()
 
     def flags(self) -> dict:
-        return startup_flags(provider_name=self.provider.name,
-                             model=self.model, voice=self.voice,
-                             language=self.language,
-                             persona=self.persona_summary,
-                             robot=self.robot, credential=self.credential)
+        flags = startup_flags(provider_name=self.provider.name,
+                              model=self.model, voice=self.voice,
+                              language=self.language,
+                              persona=self.persona_summary,
+                              robot=self.robot, credential=self.credential)
+        flags["brain"] = self.brain_id or self.provider.name
+        flags["turn_tail_pad_s"] = self.tail_pad_s
+        flags["tts"] = (self.voice_layer.describe() if self.voice_layer is not None
+                        else "native")
+        return flags
 
 
 def build_live_config(provider=None, system_prompt: "str | None" = None,
                       voice: "str | None" = None,
-                      language: "str | None" = None):
+                      language: "str | None" = None,
+                      model: str = ""):
     """The session config, now built through the provider seam.
 
     Every argument defaults to the module constant it replaced, so a call with
@@ -1501,6 +1570,7 @@ def build_live_config(provider=None, system_prompt: "str | None" = None,
         voice=voice or GEMINI_VOICE,
         language=language or GEMINI_LANGUAGE_CODE,
         tools=build_motion_tools() if ENABLE_TOOL_CALLS else [],
+        model=model,
     )
 
 
@@ -2138,8 +2208,8 @@ class Conversation:
         log_main.info("=" * 60)
 
         turn = 0
-        cfg = spec.build_config()
         shutdown_reason = "user"
+        tail_pad = np.zeros(int(spec.tail_pad_s * GEMINI_INPUT_RATE), dtype=np.int16)
         session_attempt = 0           # 0 = initial open; incremented on each reopen
         reopen_prev_turn_id = None    # turn id that triggered the pending reopen
 
@@ -2150,7 +2220,7 @@ class Conversation:
                     break
                 reopen_after_hard_abort = False
                 _t_connect_start = time.perf_counter()
-                async with spec.provider.connect(self.client, cfg, spec.model) as session:
+                async with spec.open_session(self.client) as session:
                     _connect_ms = int((time.perf_counter() - _t_connect_start) * 1000)
                     if session_attempt == 0:
                         log_session.info("Gemini Live session opened. Reusing for all turns.")
@@ -2175,8 +2245,13 @@ class Conversation:
                         t_turn_start = time.perf_counter()
 
                         t_mic_start = time.perf_counter()
+                        # A backend that listens live (gpt-live-1) hands the
+                        # capture a frame tap; Gemini has none and gets None.
+                        _streamer = getattr(session, "mic_streamer", None)
+                        on_frame = _streamer() if _streamer is not None else None
                         mic_audio = await asyncio.to_thread(
-                            record_with_vad, self.vad, self.robot, self._stop_flag)
+                            record_with_vad, self.vad, self.robot, self._stop_flag,
+                            on_frame)
                         t.mic_record_s = time.perf_counter() - t_mic_start
                         if mic_audio.size == 0:
                             # Either no viable speech, or a stop was requested
@@ -2197,10 +2272,15 @@ class Conversation:
                         _transition("SENDING", reason="vad_done")
 
                         t_send_start = time.perf_counter()
+                        # Trailing silence for a model that endpoints on its
+                        # own VAD (Gemini 3.8 -- see providers/gemini.py).
+                        # Zero-length for 3.1, so its bytes are unchanged.
+                        send_audio = (np.concatenate([mic_audio, tail_pad])
+                                      if tail_pad.size else mic_audio)
                         try:
                             await session.send_realtime_input(
                                 audio=types.Blob(
-                                    data=mic_audio.tobytes(),
+                                    data=send_audio.tobytes(),
                                     mime_type=f"audio/pcm;rate={GEMINI_INPUT_RATE}",
                                 )
                             )
@@ -2225,7 +2305,8 @@ class Conversation:
                         _emit("gemini.send.audio_batch",
                               chunks=1,
                               samples=int(mic_audio.size),
-                              duration_ms=int(mic_audio.size / GEMINI_INPUT_RATE * 1000))
+                              duration_ms=int(mic_audio.size / GEMINI_INPUT_RATE * 1000),
+                              tail_pad_ms=int(tail_pad.size / GEMINI_INPUT_RATE * 1000))
 
                         try:
                             response_audio, user_txt, asst_txt = await drain_one_turn_streaming(
