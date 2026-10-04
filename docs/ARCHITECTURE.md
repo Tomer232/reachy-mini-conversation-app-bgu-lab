@@ -214,6 +214,12 @@ the `ReachyMini` context, exits rc=0.
 | `test_breathing.py` | Phase 3A — exec the new player, send no audio for 30 s, watch the robot breathe; reports motion-loop frequency stats at shutdown. |
 | `list_moves.py` | Phase 3B — regenerate `archive/move_catalog.md` from the installed `RecordedMoves` + `reachy_mini_dances_library` libraries. |
 | `test_motion_command.py` | Phase 3B — exec the new player, send a fixed sequence of `play_emotion` / `dance` / `move_head` / `stop` commands directly (no Gemini, no mic). Watch the robot perform each one. |
+| `start_reachy.py` | **The launcher.** Discovers the robot, probes for the K11 on both machines, serves the mode-choice page, enforces a single instance, starts the chosen mode. Invoked by `..\start.ps1`. |
+| `deploy_robot_app.py` | Push the whole app to `/home/pollen/reachy_chat/` for robot mode (incremental; `--with-show` adds the cue WAVs; `--check` verifies without copying). Verifies every module imports under the robot's venv. |
+| `test_vad_parity.py` | Check the ONNX VAD on the robot against the torch VAD on the laptop, frame by frame. Run after touching either. |
+| `test_show_editor.py` | Round-trip the cue editor: add, edit (re-records), delete, and assert `cues.json` comes back identical. `--no-tts` skips synthesis. |
+| `exp_session_reopen.py` | Live-API experiment behind the silence handling: does silence get a reply, does it poison the session, does a reopen recover. |
+| `test_local_player.py` | Robot-side twin of `test_streaming_robot.py`: drives the player as a child process. Two beeps and a head turn, no Gemini, no mic. |
 
 ## When this might fail
 
@@ -462,6 +468,212 @@ python laptop_chat.py
 
 Tool calls appear in the laptop log as
 `[INFO] [tool] play_emotion(name=lost1) -> queued`.
+
+## Robot mode — the whole app on the body
+
+Added 2026-07-27, when the K11 receiver moved onto the robot's own USB. The
+goal was the laptop off-stage during the lecture, not absent: it still runs the
+launcher, still shows the dashboard, still fires show cues. What moves is the
+audio path.
+
+```
+laptop mode   mic -> laptop [VAD -> Gemini -> resample] --SSH--> robot [player]
+robot mode                   robot [VAD -> Gemini -> resample -> player]
+                             laptop: browser only
+```
+
+Enabled by `laptop_chat.py --local-robot`, which sets `conversation.LOCAL_ROBOT`.
+That flag is read **at call time**, never captured at import, so the CLI can
+flip it after the module loads. Four things branch on it, and nothing else:
+
+| Branch | Laptop | Robot |
+|---|---|---|
+| `_resolve_input_device` | `USBAudio` under MME at 16 kHz | `Composite` under ALSA at 48 kHz, `decim=3`, `gain=3.0` |
+| `StreamingRobotPlayer.__init__` | paramiko channel | `local_transport.LocalPlayerChannel` |
+| VAD class (in `system.py`) | `vad.SileroVAD` (torch.jit) | `vad_onnx.SileroVADOnnx` |
+| `get_robot_host` fallback | `ROBOT_HOST_DEFAULT` | `127.0.0.1` |
+
+Everything downstream — framing, sentinels, the drain loop, tool dispatch, the
+listening state machine, the dashboard — is shared code taking the same path
+in both modes.
+
+### Why a channel adapter instead of a second player class
+
+`LocalPlayerChannel` implements the eight methods `StreamingRobotPlayer` uses
+from `paramiko.Channel` (`send`, `closed`, `shutdown_write`,
+`recv_exit_status`, `close`, `recv_stderr_ready`, `recv_stderr`,
+`exit_status_ready`) over `subprocess.Popen`. The alternative — a parallel
+player implementation — would have duplicated the resampler, the framing, the
+ready detection and the shutdown sequence, i.e. precisely the code that took
+the longest to get right against live hardware. Substituting the transport
+underneath keeps one implementation of all of it.
+
+The child is the same `~/scripts/robot_streaming_player.py` the laptop path
+execs over SSH. One player on the robot, driven two ways.
+
+### Capture: 48 kHz and gain
+
+The robot's PortAudio exposes only raw `hw:3,0` — no plug layer, so no OS
+resampler to lean on. The device is 48 kHz / S16_LE / mono only, and a 16 kHz
+`InputStream` fails with `PaErrorCode -9997`. So:
+
+- Capture at 48 kHz in `SILERO_FRAME_SIZE * 3` blocks.
+- Per frame, `resample_poly(x, 1, 3)` down to 512 samples for the VAD. Plain
+  `[::3]` would fold everything above 8 kHz into the speech band as noise —
+  exactly where the VAD is looking.
+- At end of turn, resample the **whole** recording in one pass for Gemini, so
+  its ASR gets continuous filter output rather than stitched per-frame blocks.
+- Multiply by `CAPTURE_GAIN_LINUX = 3.0` before anything sees the samples.
+
+That last one matters more than it looks. Measured on the robot, speech peaks
+at -15..-20 dBFS and the quietest real segments landed at 0.031-0.049 against
+`MIN_PEAK_FLOOR = 0.03`. Silero separated speech perfectly at those levels
+(p=1.000 speech, p<0.07 silence), but the energy gate's margin was thin enough
+that a softer speaker would start getting turns rejected. Raising the capture
+to laptop-equivalent levels is the right fix; lowering `MIN_PEAK_FLOOR` would
+have widened the gate to room noise as well.
+
+### VAD: same model, different runtime
+
+`vad.py` needs torch, which the robot does not have and should not get (~1 GB
+against ~3.7 GB free). `vad_onnx.py` is a numpy reimplementation of
+`silero_vad.utils_vad.OnnxWrapper` — same weights, `onnxruntime` (already in
+the robot's venv), no torch. It reproduces the model contract exactly,
+including the 64-sample sliding context that gets prepended to each frame.
+
+`tools/test_vad_parity.py` runs both over `archive/bench_input_he.wav` and
+compares frame by frame. First run: max probability difference `0.000000`,
+80/80 speech frames identical, zero decision disagreements. Re-run it if either
+backend changes — every endpointing tunable was calibrated on the torch
+numbers, so a drift there silently retunes the whole turn loop.
+
+`vad.py`'s torch import is now inside `__init__` rather than at module scope,
+because `conversation.py` imports `SileroVAD` unconditionally and an
+import-time torch dependency makes the entire app unimportable on the robot.
+`paramiko` is guarded the same way, for the same reason.
+
+### The launcher
+
+`tools/start_reachy.py`, run via `start.ps1` from the `reachy-mini` folder.
+Discovers the robot by scanning the laptop's own /24 (so a new venue costs
+nothing), probes for the K11 on both machines, and recommends a mode.
+
+The mic probe is worth describing because it answers a better question than
+"is a device present". A receiver whose transmitter is off enumerates
+perfectly and returns **exactly** zero — digital silence, not a low level. A
+linked receiver in a quiet room returns ~2e-4 RMS. So `peak > 1e-5` cleanly
+separates "the link is up" from "the transmitter is off", which is invisible
+to anyone looking at the hardware and has cost real debugging time before.
+
+Single-instance enforcement is the other reason it exists: both modes drive
+the same robot through the same SDK and the same player, and two at once fight
+over the audio device. The symptom — robot moves but never speaks — is
+indistinguishable from the broken-mic failure this project already works
+around, so the launcher kills everything before starting anything.
+
+## Editing the show script from the board
+
+`show_editor.py` puts add / edit / delete behind the operator board, so a line
+can be reworded the evening before a talk without a terminal or a JSON editor.
+
+It deliberately reuses `tools/build_show.py`'s `synthesise()` and `text_hash()`
+rather than reimplementing them, so a cue edited in the browser is byte-identical
+to one built from the command line, and neither invalidates the other's cache.
+`docs/SHOW_SCRIPT.md` is regenerated on every write — a change that updates the
+robot but not the printed sheet the speaker is reading from is worse than no
+change at all.
+
+Guards, in rough order of how much trouble they save:
+
+- **Motion names are validated against the installed catalogs** on save. An
+  unknown name fails *silently* on the robot (it logs and keeps the current
+  move), so without this a typo looks like a cue that simply doesn't move,
+  mid-lecture, with no visible cause.
+- **Backups.** Every write copies the previous `cues.json` into
+  `show/backups/`, last 30 kept. It is the one artifact here with no other copy.
+- **Atomic writes** (`.tmp` + `replace`) and a re-entrant lock, so two browser
+  tabs cannot interleave a read-modify-write and silently lose a line.
+- **Hotkey collisions** and cues that would do nothing (no text, no motion) are
+  rejected with a message rather than saved.
+- Deleting a cue that is currently playing returns 409 instead of pulling the
+  WAV out from under the streaming thread.
+
+Synthesis runs on a worker thread (`asyncio.to_thread`) because it is a
+multi-second network call and a blocked event loop would freeze the board
+mid-edit.
+
+The card is a `<div>` with an inner fire target rather than a `<button>`,
+because the edit control lives inside it and a button inside a button is
+invalid HTML that browsers repair unpredictably. The edit button calls
+`stopPropagation` — without it, clicking edit would also fire the cue and
+announce the line to the room.
+
+`tools/test_show_editor.py` exercises the whole round trip against the real
+show directory, including one live TTS call, and asserts `cues.json` is
+restored byte-for-byte afterwards.
+
+## Silence handling — when Gemini doesn't answer
+
+Rewritten 2026-07-27 after a live run where three turns in a row produced ~90 s
+of a robot doing nothing. Applies to both modes.
+
+### What actually happens
+
+A single VAD frame over threshold — a tap, a chair, servos — starts a turn, and
+the 0.8 s hangover guarantees the recording is ~0.9 s. That always clears
+`MIN_SPEECH_S` (0.3 s), **because that check is on recording length, not speech
+content**. So a second of room tone goes to Gemini as a question, and Gemini
+correctly says nothing.
+
+The old code read "no reply" as a wedged session: it waited 25 s, then closed
+and reopened the session. Both halves were wrong.
+
+### Why there is no VAD-side fix
+
+The obvious answer is a minimum speech-content threshold. It was implemented,
+measured against all 122 historical turns that got a reply, and **removed**.
+A 0.3 s bar catches 14 genuine noise turns but also kills four real one-word
+answers — "בסדר.", "לא.", "לא, נו.", "later out" — which register 1-4 speech
+frames each. The two classes overlap completely on frame count, on `max_prob`
+(real 0.56-0.80, noise 0.53-0.86) and on `mean_prob`. Whether a 1-frame turn
+was speech is only knowable from what the ASR makes of it, i.e. after sending.
+
+`record_with_vad` therefore logs speech content but does not gate on it. The
+real cure is push-to-talk, which removes the guess rather than tuning it.
+
+### So: make a no-reply cheap instead
+
+`tools/exp_session_reopen.py` established against the live API that (a) silence
+gets no reply, which is correct behaviour, and (b) a silent turn does **not**
+poison the session — the next turn on the same session answers normally. So:
+
+| Situation | Detection | Then |
+|---|---|---|
+| Nothing arrived at all | `_first_chunk_budget_s(mic_record_s)` + `DRAIN_NO_REPLY_ABORT_S` | Log, keep session, listen again |
+| Audio started, then stopped | `DRAIN_WATCHDOG_TIMEOUT_S` + `DRAIN_HARD_ABORT_S` | Abort, close, reopen |
+
+The second row is the genuine zombie case the reopen was written for, and it is
+untouched — the experiment says nothing about it.
+
+### The pre-first-chunk budget is per-turn
+
+First-chunk latency tracks how much audio was sent: fitted across every logged
+turn, `first_chunk ≈ 1.5 + 0.44 × recording`. A single fixed budget has to be
+sized for the longest turn, which is why a 0.9 s junk turn used to sit in
+silence for 13 s. `_first_chunk_budget_s` scales it:
+
+```
+budget = clamp(3.5 + 0.8 × recording, 4.0, 12.0)
+```
+
+Worst-case headroom over every observed first-chunk time is 1.61×, and a
+noise-triggered turn now recovers in ~7 s rather than 13 s (originally 25 s).
+`drain.timeout` records `threshold_s` and `mic_record_s` so the event stays
+interpretable now that the budget varies per turn.
+
+`DRAIN_WATCHDOG_TIMEOUT_S` was also raised 5.0 → 8.0: it fired on three
+*successful* turns (5.5 / 5.9 / 5.7 s gaps before `turn_complete` on long
+responses). A watchdog that cries wolf on healthy turns trains you to ignore it.
 
 ## Phase 3C — listening state machine, idle prompts, energy gate, adaptive VAD
 

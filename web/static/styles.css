@@ -64,6 +64,61 @@
 .log-CRITICAL { color: rgb(220 38 38); }  /* red-600 */
 .log-DEBUG   { color: rgb(148 163 184); } /* slate-400 (normally filtered out) */
 
+/* Persona switch. A real toggle rather than a button, because the whole
+   design of this control is that its state is readable from across a room:
+   green means this robot is in character, grey means it is itself. */
+.switch {
+  position: relative;
+  display: inline-block;
+  width: 2.75rem;
+  height: 1.5rem;
+  flex: 0 0 auto;
+  cursor: pointer;
+}
+.switch input {
+  opacity: 0;
+  width: 0;
+  height: 0;
+}
+.switch .slider {
+  position: absolute;
+  inset: 0;
+  background: rgb(203 213 225);         /* slate-300 */
+  border-radius: 9999px;
+  transition: background-color 150ms ease;
+}
+.switch .slider::before {
+  content: "";
+  position: absolute;
+  height: 1.125rem;
+  width: 1.125rem;
+  left: 0.1875rem;
+  top: 0.1875rem;
+  background: #fff;
+  border-radius: 9999px;
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.2);
+  transition: transform 150ms ease;
+}
+.switch input:checked + .slider { background: rgb(22 163 74); }   /* green-600 */
+.switch input:checked + .slider::before { transform: translateX(1.25rem); }
+.switch input:disabled + .slider { opacity: 0.45; cursor: not-allowed; }
+
+/* Form fields inside the persona panel */
+.field {
+  width: 100%;
+  font-size: 0.875rem;
+  padding: 0.4rem 0.6rem;
+  border: 1px solid rgb(203 213 225);   /* slate-300 */
+  border-radius: 6px;
+  background: #fff;
+  color: rgb(51 65 85);                 /* slate-700 */
+}
+.field:focus {
+  outline: 2px solid rgb(147 197 253);  /* blue-300 */
+  outline-offset: -1px;
+}
+textarea.field { resize: vertical; line-height: 1.4; }
+
 /* Chat bubble slide-in */
 @keyframes bubblein {
   from { opacity: 0; transform: translateY(12px); }

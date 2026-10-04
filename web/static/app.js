@@ -30,6 +30,19 @@
     chat: $("chat"),
     chatConvId: $("chat-conv-id"),
     chatConvIdSpan: $("chat-conv-id").querySelector("span"),
+    robotName: $("robot-name"),
+    robotBadges: $("robot-badges"),
+    personaToggle: $("persona-toggle"),
+    personaPanel: $("persona-panel"),
+    personaSummary: $("persona-summary"),
+    personaPreset: $("persona-preset"),
+    personaText: $("persona-text"),
+    personaVoice: $("persona-voice"),
+    personaSave: $("persona-save"),
+    personaReset: $("persona-reset"),
+    personaMsg: $("persona-msg"),
+    personaHint: $("persona-hint"),
+    personaCount: $("persona-count"),
   };
 
   let currentState = "STARTING";
@@ -274,18 +287,54 @@
     el.startSystemBtn.disabled = true; el.stopSystemBtn.disabled = true;
     await post("/api/system/stop", "stop system");
   }
+  // Fallback for when navigator.clipboard is absent. That API is restricted to
+  // secure contexts: HTTPS, or http on localhost. Laptop mode serves the
+  // dashboard from 127.0.0.1 so it qualifies, but robot mode serves it from
+  // the robot's LAN address over plain http, where navigator.clipboard is
+  // simply undefined — which is why Copy logs worked for months and then
+  // stopped the first time the dashboard was opened from the robot.
+  // execCommand("copy") is deprecated but is not restricted this way, and it
+  // remains the only option available on a plain-http origin.
+  function copyViaTextarea(text) {
+    const ta = document.createElement("textarea");
+    ta.value = text;
+    // Keep it off-screen and non-disruptive: no scroll jump, no visible flash,
+    // but still focusable/selectable, which execCommand requires.
+    ta.setAttribute("readonly", "");
+    ta.style.position = "fixed";
+    ta.style.top = "-1000px";
+    ta.style.opacity = "0";
+    document.body.appendChild(ta);
+    try {
+      ta.select();
+      ta.setSelectionRange(0, ta.value.length);   // iOS/Safari need this
+      return document.execCommand("copy");
+    } catch (e) {
+      return false;
+    } finally {
+      document.body.removeChild(ta);
+    }
+  }
+
   async function copyLogs() {
     const text = logLines.join("\n");
     const feedback = (m) => {
       el.copyLogsStatus.textContent = m;
-      setTimeout(() => { el.copyLogsStatus.textContent = ""; }, 1500);
+      setTimeout(() => { el.copyLogsStatus.textContent = ""; }, 2500);
     };
+    if (!text) { feedback("Nothing to copy"); return; }
     try {
-      if (!navigator.clipboard || !navigator.clipboard.writeText)
-        throw new Error("clipboard unavailable");
-      await navigator.clipboard.writeText(text);
-      feedback("Copied");
-    } catch (e) { feedback("Copy failed"); }
+      if (navigator.clipboard && navigator.clipboard.writeText) {
+        await navigator.clipboard.writeText(text);
+        feedback("Copied");
+        return;
+      }
+      throw new Error("clipboard API unavailable (insecure origin)");
+    } catch (e) {
+      // Either no API, or the write was refused (permissions, focus).
+      if (copyViaTextarea(text)) feedback("Copied");
+      else feedback("Copy failed — select the log and use Ctrl-C");
+    }
   }
 
   // ---- WS dispatch ----------------------------------------------------
@@ -294,6 +343,8 @@
       case "state.snapshot":
         setState(m.state);
         setRobot(m.robot);
+        setIdentity(m.identity);
+        setPersona(m.persona);
         if (m.conversation) {
           setConversationHeader(m.conversation.id);
           el.convTurns.textContent = m.conversation.turn_count != null ? m.conversation.turn_count : 0;
@@ -341,6 +392,12 @@
       case "turn.aborted":
         appendAborted(m.turn_id, m.reason);
         break;
+      case "persona.change":
+        // Another tab (or another phone) changed this robot's persona. Every
+        // open dashboard follows, so two people cannot believe different
+        // things about what the robot in front of them is doing.
+        setPersona(m);
+        break;
       case "log":
         appendLogLine(m.level, m.logger, m.msg, m.ts);
         break;
@@ -351,6 +408,192 @@
         break;
     }
   }
+
+  // ---- identity + persona switch -------------------------------------
+
+  function setIdentity(info) {
+    if (!info) return;
+    const robot = info.robot || {};
+    const name = robot.display_name || "Reachy Mini";
+    el.robotName.textContent = name;
+    // The tab title too: ten tabs all reading "Reachy Mini Handler Dashboard"
+    // is ten tabs you have to click through to find the right robot.
+    document.title = name + " — Reachy";
+
+    const badges = [];
+    const provider = info.provider || {};
+    if (provider.display_name) {
+      badges.push({ text: provider.display_name, tone: provider.implemented ? "slate" : "amber" });
+    }
+    const key = info.key || {};
+    if (key.error) {
+      badges.push({ text: "no API key", tone: "red", title: key.error });
+    } else if (key.label) {
+      // Label and last four only. The key itself never reaches this page.
+      badges.push({ text: key.label + " ··" + (key.key_tail || ""), tone: "slate",
+                    title: "key source: " + (key.source || "") });
+    }
+    el.robotBadges.innerHTML = "";
+    badges.forEach((b) => {
+      const span = document.createElement("span");
+      const tones = {
+        slate: "bg-slate-100 text-slate-600 border-slate-200",
+        amber: "bg-amber-50 text-amber-700 border-amber-200",
+        red: "bg-red-50 text-red-700 border-red-200",
+      };
+      span.className = "px-2 py-0.5 rounded border " + (tones[b.tone] || tones.slate);
+      span.textContent = b.text;
+      if (b.title) span.title = b.title;
+      el.robotBadges.appendChild(span);
+    });
+  }
+
+  // True while the user is mid-edit, so a broadcast from another tab does not
+  // overwrite what someone is typing. Live-updating a textarea under someone's
+  // hands is the fastest way to lose a persona they were halfway through.
+  let personaDirty = false;
+  let personaLoaded = false;
+
+  function fillOptions(select, values, selected, blankLabel) {
+    select.innerHTML = "";
+    if (blankLabel != null) {
+      const o = document.createElement("option");
+      o.value = ""; o.textContent = blankLabel;
+      select.appendChild(o);
+    }
+    values.forEach((v) => {
+      const o = document.createElement("option");
+      o.value = v.value != null ? v.value : v;
+      o.textContent = v.label != null ? v.label : v;
+      select.appendChild(o);
+    });
+    select.value = selected || "";
+  }
+
+  function setPersona(p) {
+    if (!p) return;
+
+    el.personaToggle.checked = !!p.enabled;
+    el.personaPanel.classList.toggle("hidden", !p.enabled);
+
+    if (!personaDirty) {
+      el.personaText.value = p.overlay || "";
+      fillOptions(el.personaPreset,
+                  (p.presets || []).map((x) => ({ value: x.id, label: x.label || x.id })),
+                  p.preset_id, "Write my own");
+      fillOptions(el.personaVoice, p.voices || [],
+                  p.voice || "", "Default voice (" + (p.default_voice || "—") + ")");
+    }
+
+    // The summary is the honest line: what this robot is *actually* running.
+    if (p.active) {
+      const what = p.preset_id
+        ? ((p.presets || []).find((x) => x.id === p.preset_id) || {}).label || p.preset_id
+        : "Custom";
+      el.personaSummary.textContent = "In character — " + what;
+      el.personaSummary.className = "text-sm text-green-700 font-medium mt-1";
+    } else {
+      el.personaSummary.textContent = p.enabled
+        ? "Switched on, but nothing written yet"
+        : "Base persona";
+      el.personaSummary.className = "text-sm text-slate-500 mt-1";
+    }
+
+    el.personaHint.textContent = p.applies_next
+      ? "Applies to the next conversation"
+      : "";
+    updatePersonaCount(p.max_chars);
+    personaLoaded = true;
+  }
+
+  function updatePersonaCount(max) {
+    const limit = max || 1500;
+    const n = el.personaText.value.length;
+    el.personaCount.textContent = n ? n + " / " + limit : "";
+    el.personaCount.className = n > limit
+      ? "text-xs text-red-600" : "text-xs text-slate-400";
+  }
+
+  function personaMessage(text, ok) {
+    el.personaMsg.textContent = text || "";
+    el.personaMsg.className = "text-xs " + (ok ? "text-green-700" : "text-red-600");
+    if (text) setTimeout(() => {
+      if (el.personaMsg.textContent === text) el.personaMsg.textContent = "";
+    }, 4000);
+  }
+
+  async function sendPersona(body) {
+    try {
+      const r = await fetch("/api/persona", {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+      });
+      const data = await r.json();
+      if (!r.ok) {
+        personaMessage(data.detail || "Could not save that.", false);
+        return null;
+      }
+      personaDirty = false;
+      setPersona(data);
+      return data;
+    } catch (e) {
+      personaMessage("Could not reach the robot.", false);
+      return null;
+    }
+  }
+
+  async function loadPersona() {
+    try {
+      const [idRes, pRes] = await Promise.all([
+        fetch("/api/identity"), fetch("/api/persona"),
+      ]);
+      setIdentity(await idRes.json());
+      setPersona(await pRes.json());
+    } catch (e) { /* the WS snapshot carries both as well */ }
+  }
+
+  el.personaToggle.onchange = async () => {
+    const on = el.personaToggle.checked;
+    el.personaPanel.classList.toggle("hidden", !on);
+    // Switching on saves nothing by itself; switching off is the reset, and
+    // it takes effect immediately without needing Save.
+    const body = { enabled: on };
+    if (on && el.personaText.value.trim()) body.overlay = el.personaText.value;
+    const data = await sendPersona(body);
+    if (data) personaMessage(on ? "" : "Back to the base persona.", true);
+  };
+
+  el.personaPreset.onchange = async () => {
+    const id = el.personaPreset.value;
+    if (!id) return;
+    personaDirty = false;
+    await sendPersona({ preset_id: id, enabled: true });
+  };
+
+  el.personaText.oninput = () => { personaDirty = true; updatePersonaCount(); };
+
+  el.personaSave.onclick = async () => {
+    const data = await sendPersona({
+      overlay: el.personaText.value,
+      voice: el.personaVoice.value,
+      enabled: true,
+    });
+    if (data) personaMessage("Saved.", true);
+  };
+
+  el.personaVoice.onchange = () => { personaDirty = true; };
+
+  el.personaReset.onclick = async () => {
+    try {
+      const r = await fetch("/api/persona/reset", { method: "POST" });
+      personaDirty = false;
+      setPersona(await r.json());
+      personaMessage("Cleared — back to the base persona.", true);
+    } catch (e) {
+      personaMessage("Could not reach the robot.", false);
+    }
+  };
 
   function connect() {
     const proto = location.protocol === "https:" ? "wss" : "ws";
@@ -367,5 +610,6 @@
   el.stopSystemBtn.onclick = stopSystem;
   el.copyLogsBtn.onclick = copyLogs;
 
+  loadPersona();
   connect();
 })();

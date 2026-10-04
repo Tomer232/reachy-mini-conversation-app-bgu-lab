@@ -24,8 +24,15 @@ import logging
 from typing import Any
 
 import numpy as np
-import torch
-from silero_vad import load_silero_vad
+
+# torch and silero_vad are imported inside __init__, not here, so that
+# ``from vad import SileroVAD`` still works on a machine without PyTorch — the
+# robot, which runs the onnxruntime twin in ``vad_onnx.py``. conversation.py
+# imports this name unconditionally, so an import-time torch dependency would
+# make the whole app unimportable there. Nothing else changes: SystemManager
+# constructs the VAD during startup, so the load still happens up front on the
+# laptop, and an import failure surfaces as a clear "VAD load failed".
+torch = None  # type: ignore[assignment]  # bound by __init__
 
 
 log = logging.getLogger("reachy.audio.vad")
@@ -46,6 +53,10 @@ class SileroVAD:
         frame_size: int = 512,
         sample_rate: int = 16000,
     ) -> None:
+        global torch
+        import torch  # noqa: F811  — binds the module global used below
+        from silero_vad import load_silero_vad
+
         self.threshold = float(threshold)
         self.frame_size = int(frame_size)
         self.sample_rate = int(sample_rate)

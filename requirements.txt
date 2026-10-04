@@ -19,8 +19,8 @@ fastapi==0.136.1
 filelock==3.29.0
 frozenlist==1.8.0
 fsspec==2026.4.0
-google-auth==2.53.0
-google-genai==2.4.0
+google-auth==2.58.0
+google-genai==2.23.0
 gstreamer_bundle==1.28.1
 gstreamer_cli==1.28.3
 gstreamer_ext_runtime==1.28.3

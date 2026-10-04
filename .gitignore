@@ -25,3 +25,8 @@ archive/
 .pytest_cache/
 .mypy_cache/
 .DS_Store
+
+# === Per-robot runtime state (written by the app, never deployed over) ===
+robot_identity.json
+persona.json
+show/backups/

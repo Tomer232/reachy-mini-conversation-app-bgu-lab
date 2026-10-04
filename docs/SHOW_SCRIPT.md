@@ -14,7 +14,7 @@ cue in order and advances; the letter/number keys fire any cue directly;
 |:---:|---|---|---|---|---:|
 | `1` | Greeting | ואיתנו כאן היום אורח קצת מיוחד… | שלום לכולם! אני ריצי מיני, נעים מאוד להכיר. | emotion: welcoming1 | 4.5s |
 | `2` | Who I am | ריצי, ספר להם קצת על עצמך | אני רובוט שולחני קטן. אין לי ידיים ואין לי רגליים, אבל יש לי ראש שזז, אנטנות, ומצלמה. זה מספיק כדי לתקשר עם אנשים. | emotion: enthusiastic1 | 10.8s |
-| `3` | Look at the room | תראה כמה אנשים באו | כמה אנשים יש פה! תנו לי רגע להסתכל עליכם. | emotion: curious1 | 4.8s |
+| `3` | Look at the room | תראה כמה אנשים באו | הבנתי שאתם סוכני ביטוח, מי יכול לתת לי הצעה לביטוח רכב יותר טובה מביטוח ישיר. | emotion: curious1 | 7.2s |
 
 ## תגובות (תנועה בלבד — בטוח לכל רגע)
 
@@ -43,6 +43,7 @@ cue in order and advances; the letter/number keys fire any cue directly;
 | `8` | Joke | יש לך גם בדיחה בשבילנו? | רוצים בדיחה? למה הרובוט הלך לפסיכולוג? כי היו לו יותר מדי באגים מהילדות. | emotion: laughing2 | 7.6s |
 | `9` | Announce the dance | ריצי, מה עוד אתה יודע לעשות? | רוצים לראות אותי רוקד? זה החלק האהוב עליי. | emotion: cheerful1 | 3.8s |
 | `0` | Dance (motion only) |  | — | dance: groovy_sway_and_roll | — |
+| `` | רר |  | מסי עדיף ברור | — | 2.8s |
 
 ## מעבר לשיחה חיה
 

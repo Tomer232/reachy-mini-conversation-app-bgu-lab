@@ -46,7 +46,14 @@ from typing import Callable
 import numpy as np
 import sounddevice as sd
 import soundfile as sf
-import paramiko
+try:
+    import paramiko
+except ImportError:  # pragma: no cover - robot mode
+    # Only the SSH transport needs it, and robot mode has no SSH hop. The
+    # robot's venv does not ship paramiko; rather than install it there for a
+    # code path that never runs, let the import fail softly. Any attempt to
+    # actually use the SSH transport without it raises below, loudly.
+    paramiko = None  # type: ignore[assignment]
 from scipy.signal import resample_poly
 
 try:
@@ -78,6 +85,20 @@ ROBOT_PYTHON = "/venvs/mini_daemon/bin/python"
 ROBOT_STREAMING_PLAYER = "/home/pollen/scripts/robot_streaming_player.py"
 ROBOT_OUTPUT_RATE = 16000   # what the robot plays at
 ROBOT_READY_TIMEOUT_S = 30   # how long to wait for the robot to come up
+
+# --- Robot mode ---
+# False (default): this process runs on the laptop, captures the laptop's mic,
+# and reaches robot_streaming_player.py over an SSH channel. Unchanged, and
+# still the fallback for the lecture.
+# True: this process runs ON the robot with the K11 receiver plugged into the
+# robot's own USB. The player becomes a local subprocess instead of an SSH
+# channel, mic capture switches to the Linux/ALSA path below, and the VAD
+# switches to the onnxruntime backend (the robot has no torch).
+#
+# Read at call time, never captured at import, so laptop_chat.py's
+# --local-robot can set it after this module is imported. The launcher sets
+# the env var; the flag is the thing the code actually consults.
+LOCAL_ROBOT = os.environ.get("REACHY_LOCAL_ROBOT", "0") == "1"
 
 GEMINI_MODEL = "gemini-3.1-flash-live-preview"
 GEMINI_INPUT_RATE = 16000   # what Gemini's input expects
@@ -135,6 +156,30 @@ MAX_TURN_S = 30
 WAIT_FOR_SPEECH_S = 15
 MIN_SPEECH_S = 0.3
 
+# NOT a gate — a documented dead end, kept here so it is not re-attempted.
+#
+# MIN_SPEECH_S above is the minimum recording *length*. It cannot catch a turn
+# triggered by a single noise frame, because the 0.8 s hangover pads any such
+# turn out past 0.3 s. In conversations/2026-07-27_17-32-37, turns 5 and 6
+# carried exactly ONE speech frame out of 29 and 105 and were sent to Gemini as
+# if they were questions; Gemini said nothing, and the watchdog read that as a
+# dead session.
+#
+# The obvious fix is a minimum *speech content* threshold. It does not work.
+# Replayed against all 122 historical turns that got a reply, a 0.3 s bar would
+# have rejected four real one-word answers — "בסדר.", "לא.", "לא, נו.",
+# "later out" — which register only 1-4 speech frames each. Against the same
+# corpus it would have caught 14 genuine noise turns. There is no threshold
+# that separates them: real short words and noise transients overlap completely
+# on frame count (both 1-4 frames), on max_prob (real 0.56-0.80, noise
+# 0.53-0.86) and on mean_prob. Whether a 1-frame turn was speech is only
+# knowable from what Gemini's ASR makes of it, i.e. after sending.
+#
+# So the strategy is the opposite one: let those turns through, and make a
+# no-reply cheap instead of catastrophic — see DRAIN_NO_REPLY_ABORT_S and the
+# no_reply_at_all branch in the turn loop. The real cure is push-to-talk, which
+# removes the guess entirely; this corpus is the argument for prioritising it.
+
 # --- Input device ---
 # Case-insensitive name substring used to pick a sounddevice input. None keeps
 # PortAudio's default-device behavior. "USBAudio" matches the K11 wireless
@@ -151,6 +196,65 @@ INPUT_HOSTAPI_PREFERENCE = (
     "Windows WASAPI",
     "Windows WDM-KS",
 )
+
+# --- Input device, robot mode (LOCAL_ROBOT) ---
+#
+# **This value is stale and is now expected to be overridden.** It names the
+# K11 receiver, which enumerated on the robot as ALSA card 3 "USB Composite
+# Device" (USB id 4c4a:4155, Jieli) -- verified 2026-07-27, when the robot's
+# own microphone was broken hardware and a lavalier was the only way it could
+# hear anything.
+#
+# The fleet does not use the K11. Every robot from here on listens through its
+# own built-in microphone, which enumerates under a name nobody has measured
+# yet, at a rate nobody has measured yet. Two things follow:
+#
+#   1. `tools/probe_internal_mic.py` exists to take that measurement. Run it on
+#      a working robot; it prints the exact --mic-match and --mic-rate to use.
+#   2. Until then these are overridable rather than edited, because a constant
+#      in this file is a constant that has to be redeployed to ten robots.
+#
+# `--mic-match` / REACHY_MIC_MATCH override the name; `--mic-rate` /
+# REACHY_MIC_RATE override the capture rate. The built-in mic sits inside the
+# head, inches from the robot's own speaker and its servos -- see the echo
+# question in GPT-LIVE-MIGRATION-PLAN.md 4.3, which the probe also measures.
+INPUT_DEVICE_LINUX: str | None = os.environ.get("REACHY_MIC_MATCH") or "Composite"
+
+# The robot exposes only the raw ALSA `hw:3,0` through PortAudio — no plug
+# layer, so there is no OS resampler to lean on the way MME does on Windows.
+# The device is 48 kHz / S16_LE / mono only; opening it at 16 kHz fails with
+# PaErrorCode -9997. We therefore capture at 48 k and downsample by 3.
+CAPTURE_RATE_LINUX = int(os.environ.get("REACHY_MIC_RATE") or 48000)
+CAPTURE_DECIM_LINUX = max(1, CAPTURE_RATE_LINUX // GEMINI_INPUT_RATE)   # 3 at 48k
+
+# Raw ALSA also skips whatever gain Windows applies on the MME path: measured
+# speech peaks at -15..-20 dBFS on the robot, against roughly -6..-12 dBFS for
+# the same voice through the laptop. The capture is boosted to restore parity
+# with the levels every threshold in this file was tuned against, and it is
+# applied to the samples themselves so the VAD and Gemini both see the same
+# audio the laptop path would have produced. Clipped, so an over-loud speaker
+# degrades gracefully rather than wrapping.
+#
+# Was 3.0, lowered to 2.0 after the first live runs, for two measured reasons:
+#
+# 1. It clipped. The loudest second of the 40 s reference capture peaked at
+#    0.346; x3 is 1.04, i.e. over full scale, so the loudest syllables were
+#    being flattened before Gemini's ASR ever saw them. x2 puts that worst case
+#    at 0.69, with headroom.
+# 2. Gain amplifies room noise just as much as speech, and noise transients
+#    crossing the VAD threshold are what start junk turns — the failure that
+#    cost the 2026-07-27 17:32 run. Less gain, fewer false triggers.
+#
+# 3.0 was originally chosen to restore parity with the laptop's energy gate.
+# That gate turned out not to exist in this code (see the note below), so the
+# reason for the larger figure did not survive contact with the source. The VAD
+# itself needs no help at raw levels: measured on the robot with no gain at all,
+# speech scored p=1.000 and silence p<0.07.
+#
+# Note for anyone reading ARCHITECTURE.md's Phase 3C section: the minimum-energy
+# gate described there (MIN_PEAK_FLOOR / MIN_PEAK_NOISE_MULT) is NOT in this
+# code — it was never ported through the Phase 4 restructure.
+CAPTURE_GAIN_LINUX = 2.0
 
 # Whether motion tools (play_emotion, dance, move_head) are registered
 # with Gemini Live. Captured in main.startup.flags so the telemetry
@@ -171,8 +275,42 @@ MAX_TOOL_CALLS_PER_TURN = 1
 # normal-ish (network + Gemini first-token latency), while post-first-chunk
 # silence is a hang. Both are observability-only — drain.timeout fires
 # at most once per turn and does not abort the drain.
-DRAIN_WATCHDOG_TIMEOUT_S = 5.0          # silence between recv events, after first_chunk
-DRAIN_FIRST_CHUNK_TIMEOUT_S = 10.0      # silence from drain start, before first_chunk
+# Silence between recv events, after first_chunk. Raised from 5.0 after it
+# cried wolf on three *successful* turns in the 2026-07-27 20:13 run
+# ("Gemini silent for 5.5s/5.9s/5.7s (last=text)"), all of which completed
+# normally about a second later. The gap shows up on long responses — the model
+# finishes streaming and takes a beat before turn_complete. 8.0 clears all three
+# observed gaps with headroom, and a genuine mid-turn hang still gets caught,
+# just 3 s later. A watchdog that fires on healthy turns trains you to ignore
+# it, which is worse than firing late.
+DRAIN_WATCHDOG_TIMEOUT_S = 8.0
+DRAIN_FIRST_CHUNK_TIMEOUT_S = 10.0      # fallback only; see _first_chunk_budget_s
+
+# Pre-first-chunk budget, as a function of how much audio was sent:
+#     budget = BASE + PER_SECOND x recording_length
+# Fitted against every logged turn: first_chunk ~= 1.5 + 0.44 x recording. These
+# constants sit well above that line (1.6-2.1x headroom on observed values)
+# while still cutting a short noise turn's dead air from 13 s to about 7 s.
+DRAIN_FIRST_CHUNK_BASE_S = 3.5
+# 0.8 rather than 0.6. With 0.6 the headroom shrank as recordings got longer
+# (down to 1.48x on an 8 s turn) because the real slope is 0.44 and 0.6 barely
+# outruns it. Raising it costs the short-turn case nothing — the base term
+# dominates there, so a noise turn still recovers in ~7 s — and buys back
+# margin exactly where aborting a real answer would hurt.
+DRAIN_FIRST_CHUNK_PER_AUDIO_S = 0.8
+# Never wait less than this regardless of how short the recording was — network
+# jitter alone can eat a couple of seconds.
+DRAIN_FIRST_CHUNK_MIN_S = 4.0
+# ...nor more than this, however long the user rambled. 30 s of recording would
+# otherwise buy a 21 s wait, which is longer than anyone will sit through.
+DRAIN_FIRST_CHUNK_MAX_S = 12.0
+
+
+def _first_chunk_budget_s(mic_record_s: float) -> float:
+    """How long to wait for Gemini's first chunk, given the audio we sent."""
+    budget = (DRAIN_FIRST_CHUNK_BASE_S
+              + DRAIN_FIRST_CHUNK_PER_AUDIO_S * max(0.0, mic_record_s))
+    return min(DRAIN_FIRST_CHUNK_MAX_S, max(DRAIN_FIRST_CHUNK_MIN_S, budget))
 # Second-stage: if silence persists this long PAST a drain.timeout (i.e.
 # >= DRAIN_WATCHDOG_TIMEOUT_S + DRAIN_HARD_ABORT_S of total silence) with
 # zero recv events in between, force-abort the turn — but keep the
@@ -181,6 +319,17 @@ DRAIN_FIRST_CHUNK_TIMEOUT_S = 10.0      # silence from drain start, before first
 # Run-2 turn-4 recovered 1.0 s after its drain.timeout, so 15 s of
 # headroom past timeout is well above the observed recovery window.
 DRAIN_HARD_ABORT_S = 15.0
+
+# Second-stage timeout for the "nothing arrived at all" case, replacing
+# DRAIN_HARD_ABORT_S there. Total dead air becomes
+# DRAIN_FIRST_CHUNK_TIMEOUT_S + this = 13 s, down from 25 s.
+#
+# Floor is set by real first-chunk latency, which scales with how long the user
+# spoke: the slowest observed across every logged run is 7.5 s (a 13 s
+# recording). 3 s on top of the 10 s first-chunk timeout leaves comfortable
+# headroom over that, and a turn this quiet is one where the model has almost
+# certainly decided there was nothing to answer.
+DRAIN_NO_REPLY_ABORT_S = 3.0
 
 # --- Streaming resampler ---
 # Gemini emits 24 kHz int16 mono; robot wants 16 kHz float32 mono.
@@ -396,6 +545,13 @@ def get_robot_host(cli_host: "str | None" = None) -> "tuple[str, str]":
     env_host = os.environ.get("REACHY_ROBOT_HOST")
     if env_host:
         return env_host.strip(), "env REACHY_ROBOT_HOST"
+    if LOCAL_ROBOT:
+        # Robot mode has no SSH hop, but the host is still used for the
+        # dashboard status panel and the daemon heartbeat (port 8000) — both of
+        # which are on this same machine. Falling through to ROBOT_HOST_DEFAULT
+        # would point the heartbeat at whatever address the robot had on some
+        # other network, and show a dead robot on a working system.
+        return "127.0.0.1", "robot mode (local)"
     return ROBOT_HOST_DEFAULT, "default"
 
 
@@ -416,7 +572,74 @@ def _default_input_info() -> dict:
         "host_api": "<default>",
         "rate": GEMINI_INPUT_RATE,
         "channels": 1,
+        "decim": 1,
+        "gain": 1.0,
     }
+
+
+def _resolve_input_device_linux() -> dict:
+    """Robot-mode device resolution: the K11 receiver on the robot's own USB.
+
+    Deliberately separate from the Windows path rather than folded into it —
+    the two share no logic worth sharing. Here there is one host API (ALSA),
+    no 16 kHz support to probe for, and a fixed 3:1 decimation; there, several
+    host APIs compete and 16 kHz is negotiated through the OS resampler.
+
+    Returns the same dict shape, with `rate` being the *capture* rate (48 k)
+    and `decim`/`gain` telling record_with_vad how to get from there to the
+    16 kHz Silero and Gemini expect.
+    """
+    needle = (INPUT_DEVICE_LINUX or "").lower()
+    try:
+        devices = sd.query_devices()
+    except Exception as e:
+        log_capture.warning(
+            "INPUT_DEVICE_LINUX=%r: sounddevice enumeration failed (%s); "
+            "using default.", INPUT_DEVICE_LINUX, e)
+        return _default_input_info()
+
+    for i, d in enumerate(devices):
+        if d.get("max_input_channels", 0) <= 0:
+            continue
+        if needle and needle not in (d.get("name", "") or "").lower():
+            continue
+        try:
+            sd.check_input_settings(
+                device=i, channels=1, samplerate=CAPTURE_RATE_LINUX)
+        except Exception as e:
+            log_capture.warning(
+                "Input %r (idx=%d) rejected %d Hz mono: %s",
+                d.get("name", ""), i, CAPTURE_RATE_LINUX, e)
+            continue
+        chosen = {
+            "device": i,
+            "name": d.get("name", ""),
+            "host_api": "ALSA",
+            "rate": CAPTURE_RATE_LINUX,
+            "channels": 1,
+            "decim": CAPTURE_DECIM_LINUX,
+            "gain": CAPTURE_GAIN_LINUX,
+        }
+        log_capture.info(
+            "Input device: %s (idx=%d, host=ALSA, %d Hz -> %d Hz /%d, gain=%.1fx)",
+            chosen["name"], i, CAPTURE_RATE_LINUX, GEMINI_INPUT_RATE,
+            CAPTURE_DECIM_LINUX, CAPTURE_GAIN_LINUX)
+        return chosen
+
+    # No fallback to the default input here, unlike the Windows path. On the
+    # robot the "default" is the robot's own built-in mic — which is broken
+    # hardware. Silently falling back to it would look like a working mic that
+    # never hears anything, which is exactly the failure this whole project
+    # exists to avoid. Better to fail loudly at startup.
+    raise RuntimeError(
+        f"robot mode: no input device matching {INPUT_DEVICE_LINUX!r} accepted "
+        f"{CAPTURE_RATE_LINUX} Hz mono. Run tools/probe_internal_mic.py on "
+        f"this robot; it prints the --mic-match and --mic-rate to pass. "
+        f"(Legacy K11 path: is the receiver plugged into the "
+        f"robot? Check `arecord -l` on the robot — it should list a 'USB "
+        f"Composite Device'.) Refusing to fall back silently to whatever "
+        f"PortAudio calls the default input."
+    )
 
 
 def _resolve_input_device() -> dict:
@@ -427,6 +650,9 @@ def _resolve_input_device() -> dict:
 
     Logs one INFO line summarising the chosen device. The caller is expected
     to invoke this exactly once per process via _ensure_input_device()."""
+    if LOCAL_ROBOT:
+        return _resolve_input_device_linux()
+
     if INPUT_DEVICE is None:
         info = _default_input_info()
         log_capture.info("Input device: <default> (16000 Hz, 1 ch)")
@@ -474,6 +700,11 @@ def _resolve_input_device() -> dict:
                 "host_api": host_name,
                 "rate": GEMINI_INPUT_RATE,
                 "channels": 1,
+                # Windows captures straight at 16 kHz through the MME
+                # resampler, at levels the thresholds were tuned on — so no
+                # decimation and no gain. Present only to keep one dict shape.
+                "decim": 1,
+                "gain": 1.0,
             }
             log_capture.info(
                 "Input device: %s (idx=%d, host=%s, 16000 Hz, 1 ch)",
@@ -494,6 +725,25 @@ def _ensure_input_device() -> dict:
     if _INPUT_DEVICE_INFO is None:
         _INPUT_DEVICE_INFO = _resolve_input_device()
     return _INPUT_DEVICE_INFO
+
+
+def _downsample_for_vad(samples_int16: np.ndarray, decim: int) -> np.ndarray:
+    """One capture-rate frame -> one SILERO_FRAME_SIZE frame for the VAD.
+
+    ``decim == 1`` (laptop) returns the int16 array untouched, so the laptop
+    path does no extra work and feed_frame takes its usual int16 branch.
+
+    Otherwise: anti-aliased decimation via resample_poly. Plain ``[::decim]``
+    would be cheaper and wrong — it folds everything above 8 kHz back down
+    into the speech band as noise, which is precisely where the VAD is
+    looking. Returns float32 in [-1, 1], which feed_frame also accepts.
+    """
+    if decim == 1:
+        return samples_int16
+    f = samples_int16.astype(np.float32) / 32768.0
+    out = resample_poly(f, 1, decim).astype(np.float32, copy=False)
+    np.clip(out, -1.0, 1.0, out=out)
+    return out
 
 
 # === VAD-based mic capture =========================================
@@ -524,7 +774,14 @@ def record_with_vad(vad: "SileroVAD",
     # into the first frames of this turn.
     vad.reset()
 
-    frame_samples = SILERO_FRAME_SIZE
+    _input_info = _ensure_input_device()
+    # Robot mode captures at 48 kHz and decimates by 3; the laptop captures
+    # straight at 16 kHz (decim=1) and every expression below collapses to
+    # what it was before. One VAD frame still means one 32 ms slice of speech
+    # either way, so every endpointing tunable keeps its meaning.
+    _decim = int(_input_info.get("decim", 1))
+    _gain = float(_input_info.get("gain", 1.0))
+    frame_samples = SILERO_FRAME_SIZE * _decim   # samples at the capture rate
     frame_bytes = frame_samples * 2  # int16 PCM
 
     audio_frames: list[bytes] = []
@@ -571,12 +828,11 @@ def record_with_vad(vad: "SileroVAD",
             batch_max = 0.0
             batch_sum = 0.0
 
-    _input_info = _ensure_input_device()
     with sd.InputStream(
-        samplerate=GEMINI_INPUT_RATE,
+        samplerate=_input_info["rate"],
         channels=1,
         dtype="int16",
-        blocksize=SILERO_FRAME_SIZE,
+        blocksize=frame_samples,
         device=_input_info["device"],
         callback=cb,
     ):
@@ -600,10 +856,22 @@ def record_with_vad(vad: "SileroVAD",
 
             for off in range(0, len(raw) - frame_bytes + 1, frame_bytes):
                 chunk = raw[off:off + frame_bytes]
-                audio_frames.append(chunk)
                 samples = np.frombuffer(chunk, dtype=np.int16)
+                if _gain != 1.0:
+                    # Boost before anything looks at the samples, so the VAD
+                    # and Gemini both see the levels the laptop path produces.
+                    # Clip rather than wrap.
+                    samples = np.clip(
+                        samples.astype(np.float32) * _gain, -32768.0, 32767.0
+                    ).astype(np.int16)
+                    chunk = samples.tobytes()
+                # Kept at the capture rate; the whole turn is resampled in one
+                # pass at the end, which is cleaner than stitching together
+                # per-frame resampler output.
+                audio_frames.append(chunk)
+                vad_samples = _downsample_for_vad(samples, _decim)
                 try:
-                    prob = vad.feed_frame(samples)
+                    prob = vad.feed_frame(vad_samples)
                 except Exception:
                     prob = 0.0
                 is_speech = vad.is_speech(prob)
@@ -664,11 +932,25 @@ def record_with_vad(vad: "SileroVAD",
         return np.array([], dtype=np.int16)
 
     audio = np.frombuffer(b"".join(audio_frames), dtype=np.int16)
+    if _decim != 1:
+        # One resample over the whole turn rather than per frame: the polyphase
+        # filter gets continuous input, so there are no per-block edge
+        # artifacts in what Gemini's ASR hears. (The VAD tolerated per-frame
+        # resampling because it only needs a probability, not fidelity.)
+        f = audio.astype(np.float32) / 32768.0
+        f = resample_poly(f, 1, _decim)
+        audio = np.clip(f * 32768.0, -32768.0, 32767.0).astype(np.int16)
     duration = len(audio) / GEMINI_INPUT_RATE
     if duration < MIN_SPEECH_S:
         log_vad.info("Turn too short (%.2fs). Skipping.", duration)
         return np.array([], dtype=np.int16)
-    log_vad.info("Recorded %.2fs", duration)
+
+    # Speech content is logged but deliberately NOT used as a gate — see
+    # MIN_SPEECH_CONTENT_S. It is the most useful single number for spotting a
+    # noise-triggered turn after the fact, so it goes in the log either way.
+    speech_content_s = speech_frames_total * SILERO_FRAME_SIZE / GEMINI_INPUT_RATE
+    log_vad.info("Recorded %.2fs (%.2fs of it speech, %d/%d frames)",
+                 duration, speech_content_s, speech_frames_total, frames_total)
     speech_end_perf = time.perf_counter()
     duration_ms = int(duration * 1000)
     _emit("user.speech.end", duration_ms=duration_ms)
@@ -721,17 +1003,35 @@ class StreamingRobotPlayer:
 
     def __init__(self, host: str, user: str, password: str,
                  robot_log_path: "Path | None" = None):
-        log_ssh.info("Connecting to robot %s as %s…", host, user)
-        self.client = paramiko.SSHClient()
-        self.client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
-        self.client.connect(host, username=user, password=password, timeout=15)
+        if LOCAL_ROBOT:
+            # Robot mode: we are already on the robot, so the player is a child
+            # process rather than an SSH session. LocalPlayerChannel exposes the
+            # same handful of methods paramiko.Channel does, so everything below
+            # this branch — framing, sentinels, drainer, ready detection,
+            # teardown — is shared verbatim between the two transports.
+            from local_transport import start_local_player
+            log_ssh.info("Robot mode: starting the player locally (no SSH).")
+            self.client, self.channel = start_local_player(
+                ROBOT_STREAMING_PLAYER)
+        else:
+            if paramiko is None:
+                raise RuntimeError(
+                    "the SSH transport needs paramiko, which is not installed. "
+                    "If this process is running on the robot, it should have "
+                    "been started with --local-robot.")
+            log_ssh.info("Connecting to robot %s as %s…", host, user)
+            self.client = paramiko.SSHClient()
+            self.client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+            self.client.connect(host, username=user, password=password,
+                                timeout=15)
 
-        transport = self.client.get_transport()
-        if transport is None:
-            raise RuntimeError("paramiko transport is None after connect")
-        self.channel = transport.open_session()
-        # -u: unbuffered stdout/stderr — needed for prompt 'ready' detection.
-        self.channel.exec_command(f"{ROBOT_PYTHON} -u {ROBOT_STREAMING_PLAYER}")
+            transport = self.client.get_transport()
+            if transport is None:
+                raise RuntimeError("paramiko transport is None after connect")
+            self.channel = transport.open_session()
+            # -u: unbuffered stdout/stderr — needed for prompt 'ready' detection.
+            self.channel.exec_command(
+                f"{ROBOT_PYTHON} -u {ROBOT_STREAMING_PLAYER}")
 
         self._ready = threading.Event()
         self._exited = threading.Event()
@@ -1144,32 +1444,87 @@ def build_motion_tools() -> list:
     return tools
 
 
-def build_live_config() -> "types.LiveConnectConfig":
-    return types.LiveConnectConfig(
-        response_modalities=["AUDIO"],
-        input_audio_transcription=types.AudioTranscriptionConfig(),
-        output_audio_transcription=types.AudioTranscriptionConfig(),
-        system_instruction=SYSTEM_PROMPT,
-        speech_config=types.SpeechConfig(
-            language_code=GEMINI_LANGUAGE_CODE,
-            voice_config=types.VoiceConfig(
-                prebuilt_voice_config=types.PrebuiltVoiceConfig(
-                    voice_name=GEMINI_VOICE
-                )
-            ),
-        ),
+class SessionSpec:
+    """Everything about one conversation that used to be a module constant.
+
+    Built by SystemManager when Start is pressed and then frozen: a participant
+    flipping the persona switch halfway through a conversation changes the
+    *next* one, never the session already speaking. A persona that could change
+    under a running session would produce a transcript that no longer matches
+    the prompt recorded beside it.
+    """
+
+    __slots__ = ("provider", "system_prompt", "voice", "language", "model",
+                 "persona_summary", "robot", "credential")
+
+    def __init__(self, provider=None, system_prompt: "str | None" = None,
+                 voice: str = "", language: str = "", model: str = "",
+                 persona_summary: str = "base",
+                 robot: "dict | None" = None,
+                 credential: "dict | None" = None):
+        import providers as _providers
+        self.provider = provider if provider is not None else _providers.get("gemini")
+        self.system_prompt = (system_prompt if system_prompt is not None
+                              else SYSTEM_PROMPT)
+        self.voice = voice or GEMINI_VOICE
+        self.language = language or GEMINI_LANGUAGE_CODE
+        self.model = model or self.provider.default_model
+        self.persona_summary = persona_summary
+        self.robot = robot or {}
+        self.credential = credential or {}
+
+    def build_config(self):
+        return build_live_config(self.provider, self.system_prompt,
+                                 self.voice, self.language)
+
+    def flags(self) -> dict:
+        return startup_flags(provider_name=self.provider.name,
+                             model=self.model, voice=self.voice,
+                             language=self.language,
+                             persona=self.persona_summary,
+                             robot=self.robot, credential=self.credential)
+
+
+def build_live_config(provider=None, system_prompt: "str | None" = None,
+                      voice: "str | None" = None,
+                      language: "str | None" = None):
+    """The session config, now built through the provider seam.
+
+    Every argument defaults to the module constant it replaced, so a call with
+    no arguments produces exactly what this function produced before the seam
+    existed. What changed is that `SystemManager` can now pass a prompt the
+    persona switch has layered and a voice the participant picked, which is
+    the whole reason the arguments are here.
+    """
+    import providers as _providers
+    prov = provider if provider is not None else _providers.get("gemini")
+    return prov.build_config(
+        system_prompt=system_prompt if system_prompt is not None else SYSTEM_PROMPT,
+        voice=voice or GEMINI_VOICE,
+        language=language or GEMINI_LANGUAGE_CODE,
         tools=build_motion_tools() if ENABLE_TOOL_CALLS else [],
     )
 
 
-def startup_flags() -> dict:
+def startup_flags(provider_name: str = "gemini", model: str = "",
+                  voice: str = "", language: str = "",
+                  persona: str = "base", robot: "dict | None" = None,
+                  credential: "dict | None" = None) -> dict:
     """The flags dict re-emitted in each conversation's main.startup event so
-    summary.json's `config` block stays populated (Phase A adjustment C/E)."""
+    summary.json's `config` block stays populated (Phase A adjustment C/E).
+
+    The fleet fields (provider, persona, robot, key) are recorded here for the
+    same reason the model and voice always were: a transcript read back next
+    week is worthless if it cannot say which robot produced it, in which
+    character, through which backend.
+    """
     info = _ensure_input_device()
-    return {
-        "model": GEMINI_MODEL,
-        "voice": GEMINI_VOICE,
-        "language": GEMINI_LANGUAGE_CODE,
+    flags = {
+        "provider": provider_name,
+        "persona": persona,
+        "model": model or GEMINI_MODEL,
+        "voice": voice or GEMINI_VOICE,
+        "language": language or GEMINI_LANGUAGE_CODE,
         "silero_threshold": SILERO_THRESHOLD,
         "silero_frame_size": SILERO_FRAME_SIZE,
         "silence_hangover_s": SILENCE_HANGOVER_S,
@@ -1186,7 +1541,19 @@ def startup_flags() -> dict:
         "drain_hard_abort_s": DRAIN_HARD_ABORT_S,
         "input_device_name": info["name"],
         "input_device_host_api": info["host_api"],
+        # Which side captured, and what it took to get to 16 kHz. Without
+        # these, two runs with very different audio paths look identical in
+        # summary.json.
+        "local_robot": LOCAL_ROBOT,
+        "capture_rate": info.get("rate", GEMINI_INPUT_RATE),
+        "capture_decim": info.get("decim", 1),
+        "capture_gain": info.get("gain", 1.0),
     }
+    if robot:
+        flags["robot"] = robot
+    if credential:
+        flags["key"] = credential
+    return flags
 
 
 def _response_scheduling(audio_started: bool):
@@ -1421,7 +1788,22 @@ async def drain_one_turn_streaming(
                         drain_state["timeout_last_recv_at_perf"] = None
                         continue
                     silent_total = now - (snap if snap is not None else drain_state["t_drain_start"])
-                    if (now - drain_state["timeout_at_perf"]) > DRAIN_HARD_ABORT_S:
+                    # Two different situations wear the same face here.
+                    #
+                    # Nothing at all has arrived: most likely the audio held no
+                    # speech and the model has nothing to answer. Confirmed
+                    # normal and non-destructive by tools/exp_session_reopen.py.
+                    # The old 15 s on top of the 10 s first-chunk timeout meant
+                    # 25 s of a robot doing nothing in front of an audience, for
+                    # something already known to be benign — so cut it short.
+                    #
+                    # Audio started and then stopped: that is the real hang the
+                    # long wait was written for. Leave it alone.
+                    abort_after = (DRAIN_NO_REPLY_ABORT_S
+                                   if drain_state["audio_chunks"] == 0
+                                   and drain_state["text_parts"] == 0
+                                   else DRAIN_HARD_ABORT_S)
+                    if (now - drain_state["timeout_at_perf"]) > abort_after:
                         _emit("drain.hard_abort",
                               seconds_silent=round(silent_total, 1),
                               seconds_since_timeout=round(now - drain_state["timeout_at_perf"], 1),
@@ -1449,7 +1831,15 @@ async def drain_one_turn_streaming(
                 last = drain_state["t_last_recv"]
                 if last is None:
                     silent = now - drain_state["t_drain_start"]
-                    threshold = DRAIN_FIRST_CHUNK_TIMEOUT_S
+                    # Scaled to how much audio we actually sent, because that
+                    # is what first-chunk latency tracks. Measured across the
+                    # 2026-07-27 runs it fits 1.5 + 0.44 x recording, so a 0.9 s
+                    # noise turn should answer in ~2 s while an 11 s question
+                    # takes ~6.4 s. A single fixed budget therefore has to be
+                    # sized for the long turn, which made every short junk turn
+                    # sit in silence for 13 s. This keeps the long-turn budget
+                    # and shrinks the short-turn one.
+                    threshold = _first_chunk_budget_s(t.mic_record_s)
                 else:
                     silent = now - last
                     threshold = DRAIN_WATCHDOG_TIMEOUT_S
@@ -1457,6 +1847,11 @@ async def drain_one_turn_streaming(
                     last_kind = drain_state["last_event_kind"]
                     _emit("drain.timeout",
                           seconds_silent=round(silent, 1),
+                          # The budget is now per-turn, so record which one this
+                          # turn was actually judged against — otherwise the
+                          # event cannot be interpreted after the fact.
+                          threshold_s=round(threshold, 1),
+                          mic_record_s=round(t.mic_record_s, 2),
                           last_event_kind=last_kind,
                           last_event_t_mono_ms=drain_state["last_event_t_mono_ms"],
                           audio_chunks_received_this_turn=drain_state["audio_chunks"],
@@ -1649,6 +2044,7 @@ class Conversation:
         convo_dir: "ConversationDir | None" = None,
         on_transcript: "Callable[[str, int, str], None] | None" = None,
         on_turn_aborted: "Callable[[int, str], None] | None" = None,
+        session: "SessionSpec | None" = None,
     ):
         self.client = client
         self.vad = vad
@@ -1656,6 +2052,10 @@ class Conversation:
         self.dir = convo_dir or ConversationDir()
         self.on_transcript = on_transcript
         self.on_turn_aborted = on_turn_aborted
+        # Which backend, which character, which voice — settled by
+        # SystemManager at the moment Start was pressed, so a persona changed
+        # mid-conversation cannot alter a session already running.
+        self.session_spec = session or SessionSpec()
 
         self.id = self.dir.dir.name
         from datetime import datetime
@@ -1720,21 +2120,27 @@ class Conversation:
         # Re-emit startup flags per conversation so summary.config stays
         # populated (the system-wide VAD/robot bring-up already happened and
         # logged to the system log, not here).
+        spec = self.session_spec
         _emit("main.startup",
               version_or_git_sha="phase4-dashboard",
-              flags=startup_flags(),
+              flags=spec.flags(),
               conversation_id=convo.dir.name)
 
         log_main.info("=" * 60)
         log_main.info("Conversation %s — turn loop start", convo.dir.name)
+        if spec.robot.get("display_name"):
+            log_main.info("Robot: %s (id %s)", spec.robot["display_name"],
+                          spec.robot.get("robot_id", "unknown"))
+        log_main.info("Provider: %s  |  Persona: %s",
+                      spec.provider.display_name, spec.persona_summary)
         log_main.info("Model: %s  |  Voice: %s  |  Lang: %s",
-                      GEMINI_MODEL, GEMINI_VOICE, GEMINI_LANGUAGE_CODE)
+                      spec.model, spec.voice, spec.language)
         log_main.info("Saving to: %s", convo.dir.relative_to(SCRIPT_DIR))
         log_main.info("End with: 'להתראות' / 'סיים שיחה' / 'goodbye' / End button")
         log_main.info("=" * 60)
 
         turn = 0
-        cfg = build_live_config()
+        cfg = spec.build_config()
         shutdown_reason = "user"
         session_attempt = 0           # 0 = initial open; incremented on each reopen
         reopen_prev_turn_id = None    # turn id that triggered the pending reopen
@@ -1746,7 +2152,7 @@ class Conversation:
                     break
                 reopen_after_hard_abort = False
                 _t_connect_start = time.perf_counter()
-                async with self.client.aio.live.connect(model=GEMINI_MODEL, config=cfg) as session:
+                async with spec.provider.connect(self.client, cfg, spec.model) as session:
                     _connect_ms = int((time.perf_counter() - _t_connect_start) * 1000)
                     if session_attempt == 0:
                         log_session.info("Gemini Live session opened. Reusing for all turns.")
@@ -1866,6 +2272,41 @@ class Conversation:
                         # reopen the session — it is left in a zombie state that
                         # emits no audio on subsequent turns. The partial audio
                         # buffer was already streamed to the robot inside drain.
+                        # Distinguish "the model had nothing to say" from "the
+                        # session is wedged". They look identical from here —
+                        # both are silence — but they need opposite responses,
+                        # and treating the first as the second is what turned
+                        # one bad turn into a 90-second outage on 2026-07-27.
+                        #
+                        # Measured with tools/exp_session_reopen.py against the
+                        # live API: send near-silence, get no reply (correct);
+                        # then send real speech on the SAME session and it
+                        # answers normally. So silence does not poison a
+                        # session, and closing it is wasted work on top of the
+                        # 15 s already spent waiting.
+                        #
+                        # The genuine zombie case — audio started, then the
+                        # stream died mid-turn — still reopens, because that
+                        # one was observed live and this experiment says
+                        # nothing about it.
+                        no_reply_at_all = (t.hard_aborted
+                                           and t.gemini_first_chunk_s <= 0.0)
+                        if no_reply_at_all:
+                            log_main.info(
+                                "Turn %d: Gemini had nothing to say (no audio, no "
+                                "text). Keeping the session and listening again.",
+                                turn)
+                            _emit("turn.end",
+                                  turn_id=turn,
+                                  total_ms=int((time.perf_counter() - t_turn_start) * 1000),
+                                  gemini_first_chunk_ms=0,
+                                  samples_sent_to_robot=0,
+                                  aborted=True, reason="gemini_no_reply")
+                            self._push_aborted(turn, "gemini_no_reply")
+                            _ev_clear_turn()
+                            _transition("IDLE", reason="gemini_no_reply")
+                            continue
+
                         if t.hard_aborted:
                             log_main.warning("Turn %d hard-aborted (Gemini silent).", turn)
                             samples_so_far = int(response_audio.size * 2 // 3) if response_audio.size else 0

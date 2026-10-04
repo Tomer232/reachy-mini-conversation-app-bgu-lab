@@ -30,15 +30,18 @@ import logging
 import time
 
 import httpx
-from google import genai
 
+import credentials as creds_mod
+import identity as identity_mod
+import providers as providers_mod
+from persona import PersonaStore
 import conversation as conv_mod
 from conversation import (
     Conversation,
     ConversationDir,
+    SessionSpec,
     StreamingRobotPlayer,
     SileroVAD,
-    get_api_key,
     get_robot_host,
     ROBOT_USER,
     ROBOT_PASSWORD,
@@ -93,7 +96,12 @@ class InvalidSystemState(Exception):
 
 
 class SystemManager:
-    def __init__(self, broadcaster, robot_host: "str | None" = None):
+    def __init__(self, broadcaster, robot_host: "str | None" = None,
+                 robot_id: "str | None" = None,
+                 robot_name: "str | None" = None,
+                 provider: "str | None" = None,
+                 api_key_id: "str | None" = None,
+                 api_key: "str | None" = None):
         self.broadcaster = broadcaster
         # Robot SSH host, resolved once here at startup: --robot-host arg >
         # REACHY_ROBOT_HOST env > default. Single source of truth for the SSH
@@ -101,10 +109,30 @@ class SystemManager:
         self.robot_host, self.robot_host_source = get_robot_host(robot_host)
         self._daemon_status_url = (
             f"http://{self.robot_host}:8000/api/daemon/status")
+
+        # Who this instance is speaking for. Resolved before anything else so
+        # every log line from here on can name its robot.
+        self.identity = identity_mod.resolve(
+            robot_id, robot_name, daemon_url=f"http://{self.robot_host}:8000")
+
+        # Which backend, and on whose key. Both are settled at construction
+        # rather than at conversation start: a robot that cannot reach a key
+        # should say so on its dashboard while idle, not discover it when
+        # somebody presses Start in front of an audience.
+        self.provider = providers_mod.get(provider or providers_mod.DEFAULT_PROVIDER)
+        self._requested_key_id = api_key_id
+        self._requested_key = api_key
+        self.credential = None
+        self.credential_error: str | None = None
+
+        # The persona switch. Off by default; whatever was saved on this robot
+        # is loaded here, which is what makes a persona survive a restart.
+        self.persona = PersonaStore(provider=self.provider.name)
+
         self.state = SystemState.STARTING
         self.vad: SileroVAD | None = None
         self.robot: StreamingRobotPlayer | None = None
-        self.client: genai.Client | None = None
+        self.client = None
         self.conversation: Conversation | None = None
         self._conv_task: asyncio.Task | None = None
         self._conv_log_handler = None
@@ -217,22 +245,41 @@ class SystemManager:
         robot side (Phase A.5 adjustment A): the VAD model and genai client
         are loaded once here and reused, never reloaded on a Start System."""
         self._set_state(SystemState.STARTING, "boot")
+        if not self.provider.implemented:
+            return self._fatal(
+                f"{self.provider.display_name} is not built yet — relaunch "
+                f"this robot with --provider gemini")
         try:
-            api_key = await asyncio.to_thread(get_api_key)
-        except SystemExit as e:
-            return self._fatal(f"no API key: {e}")
+            self.credential = await asyncio.to_thread(
+                creds_mod.resolve, self.provider.name,
+                self._requested_key_id, self._requested_key)
+        except creds_mod.NoCredential as e:
+            self.credential_error = str(e)
+            return self._fatal(str(e))
         except Exception as e:
+            self.credential_error = str(e)
             return self._fatal(f"api key resolution failed: {e}")
+        log.info("%s on key %s (%s)", self.provider.display_name,
+                 self.credential.label or "environment", self.credential.source)
 
         try:
-            self.client = genai.Client(api_key=api_key)
+            self.client = self.provider.make_client(self.credential)
         except Exception as e:
-            return self._fatal(f"genai client init failed: {e}")
+            return self._fatal(f"{self.provider.display_name} client init failed: {e}")
 
-        log.info("Loading Silero VAD…")
+        # Robot mode uses the onnxruntime backend: the robot has no PyTorch and
+        # is not getting it (~1 GB against ~3.7 GB free). tools/test_vad_parity.py
+        # showed the two backends agreeing to 0.000000 on bench_input_he.wav, so
+        # this swap does not move any endpointing threshold.
+        if conv_mod.LOCAL_ROBOT:
+            from vad_onnx import SileroVADOnnx as _VADClass
+            log.info("Loading Silero VAD (onnx backend, robot mode)…")
+        else:
+            _VADClass = SileroVAD
+            log.info("Loading Silero VAD…")
         try:
             self.vad = await asyncio.to_thread(
-                SileroVAD, SILERO_THRESHOLD, SILERO_FRAME_SIZE, GEMINI_INPUT_RATE)
+                _VADClass, SILERO_THRESHOLD, SILERO_FRAME_SIZE, GEMINI_INPUT_RATE)
         except Exception as e:
             return self._fatal(f"VAD load failed: {e}")
 
@@ -241,7 +288,14 @@ class SystemManager:
         # the first conversation). Pure enumeration, no stream opened.
         try:
             await asyncio.to_thread(conv_mod._ensure_input_device)
-        except Exception:
+        except Exception as e:
+            # On the laptop this is recoverable: resolution retries lazily and
+            # the worst case is falling back to the default input. In robot
+            # mode there is no acceptable fallback — the default input is the
+            # robot's broken built-in mic — so a missing K11 is fatal here
+            # rather than a conversation that silently never hears anything.
+            if conv_mod.LOCAL_ROBOT:
+                return self._fatal(f"microphone unavailable: {e}")
             log.exception("input device resolution failed; will retry lazily")
 
         await self._connect_robot()
@@ -291,6 +345,7 @@ class SystemManager:
                 self.client, self.vad, self.robot, convo_dir,
                 on_transcript=self._on_transcript,
                 on_turn_aborted=self._on_turn_aborted,
+                session=self._session_spec(),
             )
             self.conversation = conv
             # Phase B: forward per-turn state transitions to the UI as
@@ -521,6 +576,68 @@ class SystemManager:
 
     # ----- status snapshot -----
 
+    # ----- the persona switch and what a session is built from -----
+
+    def _session_spec(self) -> SessionSpec:
+        """Freeze the current persona into the conversation about to start.
+
+        Read once, here. The switch can be flicked while a conversation runs —
+        it applies to the next one, and the dashboard says so.
+        """
+        state = self.persona.state
+        return SessionSpec(
+            provider=self.provider,
+            system_prompt=self.persona.prompt_for(conv_mod.SYSTEM_PROMPT),
+            voice=self.persona.voice_for(self.provider.default_voice),
+            language=conv_mod.GEMINI_LANGUAGE_CODE,
+            model=self.provider.default_model,
+            persona_summary=state.summary(),
+            robot=self.identity.to_dict(),
+            credential=self.credential.public() if self.credential else {},
+        )
+
+    def persona_payload(self) -> dict:
+        """Everything the persona panel renders, in one place so the REST
+        route and the WS snapshot can never drift apart."""
+        state = self.persona.state
+        payload = state.public(self.provider.name)
+        payload["presets"] = self.persona.presets()
+        payload["voices"] = self.persona.voices()
+        payload["default_voice"] = self.provider.default_voice
+        payload["provider"] = self.provider.name
+        payload["provider_display"] = self.provider.display_name
+        payload["summary"] = state.summary()
+        payload["active"] = state.is_active
+        # True while a conversation is running: the panel uses it to say that
+        # an edit lands on the next conversation rather than this one.
+        payload["applies_next"] = (self.state == SystemState.CONVERSATION_RUNNING)
+        return payload
+
+    def set_persona(self, **changes) -> dict:
+        state = self.persona.update(**changes)
+        payload = self.persona_payload()
+        self._broadcast({"event": "persona.change", **payload})
+        return payload
+
+    def reset_persona(self) -> dict:
+        self.persona.reset()
+        payload = self.persona_payload()
+        self._broadcast({"event": "persona.change", **payload})
+        return payload
+
+    def identity_payload(self) -> dict:
+        """Who this robot is and what it is talking through. Never the key."""
+        return {
+            "robot": self.identity.to_dict(),
+            "provider": {
+                "name": self.provider.name,
+                "display_name": self.provider.display_name,
+                "implemented": self.provider.implemented,
+            },
+            "key": (self.credential.public() if self.credential
+                    else {"error": self.credential_error or "not resolved yet"}),
+        }
+
     def status(self) -> dict:
         """The /api/status payload and the basis of the WS state.snapshot."""
         conv_info = None
@@ -529,11 +646,14 @@ class SystemManager:
                 "id": self.conversation.id,
                 "started_at": self.conversation.started_at,
                 "turn_count": self.conversation.turn,
+                "persona": self.conversation.session_spec.persona_summary,
             }
         return {
             "state": self.state.name,
             "robot": self._robot_status(),
             "conversation": conv_info,
+            "identity": self.identity_payload(),
+            "persona": self.persona_payload(),
         }
 
     def snapshot(self) -> dict:

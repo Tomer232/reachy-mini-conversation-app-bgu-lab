@@ -37,6 +37,10 @@
         <button id="reload-btn" class="px-3 py-1.5 rounded bg-slate-700 hover:bg-slate-600 text-sm">
           Reload script
         </button>
+        <button id="rebuild-btn" class="px-3 py-1.5 rounded bg-slate-700 hover:bg-slate-600 text-sm"
+                title="Re-record any line whose text changed">
+          Rebuild audio
+        </button>
         <a href="/" target="_blank"
            class="px-3 py-1.5 rounded bg-slate-700 hover:bg-slate-600 text-sm">Dashboard</a>
         <button id="stop-btn"
@@ -68,6 +72,86 @@
     </p>
 
     <div id="board" class="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-4"></div>
+  </div>
+
+  <!-- Cue editor. Hidden until the edit button on a card (or "+ add cue") is
+       pressed. Saving re-records the line, which takes a few seconds. -->
+  <div id="ed-modal"
+       class="hidden fixed inset-0 z-50 bg-black/60 flex items-start justify-center p-4 overflow-y-auto">
+    <div class="w-full max-w-xl rounded-xl bg-slate-800 border border-slate-600 shadow-2xl mt-10">
+      <div class="px-4 py-3 border-b border-slate-700 flex items-center gap-3">
+        <h2 id="ed-title" class="font-semibold">Edit cue</h2>
+        <button id="ed-delete"
+                class="ml-auto px-2.5 py-1 rounded text-xs bg-red-700 hover:bg-red-600">
+          Delete
+        </button>
+      </div>
+
+      <div class="p-4 space-y-3">
+        <div>
+          <label class="block text-xs text-slate-400 mb-1" for="ed-label">Name (for you, on the card)</label>
+          <input id="ed-label" type="text"
+                 class="w-full rounded bg-slate-900 border border-slate-600 px-2 py-1.5 text-sm">
+        </div>
+
+        <div>
+          <label class="block text-xs text-slate-400 mb-1" for="ed-text">
+            What Reachy says — leave empty for a motion-only cue
+          </label>
+          <textarea id="ed-text" rows="4" dir="rtl"
+                    class="w-full rounded bg-slate-900 border border-slate-600 px-2 py-1.5 text-sm rtl leading-relaxed"></textarea>
+          <p class="text-[11px] text-slate-500 mt-1">
+            Changing this re-records the line, which takes a few seconds.
+          </p>
+        </div>
+
+        <div class="grid grid-cols-3 gap-3">
+          <div>
+            <label class="block text-xs text-slate-400 mb-1" for="ed-hotkey">Hotkey</label>
+            <input id="ed-hotkey" type="text" maxlength="1"
+                   class="w-full rounded bg-slate-900 border border-slate-600 px-2 py-1.5 text-sm font-mono">
+          </div>
+          <div>
+            <label class="block text-xs text-slate-400 mb-1" for="ed-motion-type">Motion</label>
+            <select id="ed-motion-type"
+                    class="w-full rounded bg-slate-900 border border-slate-600 px-2 py-1.5 text-sm">
+              <option value="">none</option>
+              <option value="emotion">emotion</option>
+              <option value="dance">dance</option>
+              <option value="head">head</option>
+            </select>
+          </div>
+          <div>
+            <label class="block text-xs text-slate-400 mb-1" for="ed-motion-name">Which</label>
+            <select id="ed-motion-name"
+                    class="w-full rounded bg-slate-900 border border-slate-600 px-2 py-1.5 text-sm"></select>
+          </div>
+        </div>
+
+        <div>
+          <label class="block text-xs text-slate-400 mb-1" for="ed-boss">
+            Boss's cue line — printed in the script, not spoken
+          </label>
+          <input id="ed-boss" type="text" dir="rtl"
+                 class="w-full rounded bg-slate-900 border border-slate-600 px-2 py-1.5 text-sm rtl">
+        </div>
+
+        <p id="ed-error" class="text-sm text-red-400 min-h-[1.25rem]"></p>
+      </div>
+
+      <div class="px-4 py-3 border-t border-slate-700 flex items-center gap-2">
+        <span class="text-[11px] text-slate-500">Ctrl-Enter saves · Esc closes</span>
+        <button id="ed-cancel"
+                class="ml-auto px-3 py-1.5 rounded bg-slate-700 hover:bg-slate-600 text-sm">
+          Cancel
+        </button>
+        <button id="ed-save"
+                class="px-4 py-1.5 rounded bg-sky-600 hover:bg-sky-500 font-semibold text-sm
+                       disabled:opacity-50">
+          Save
+        </button>
+      </div>
+    </div>
   </div>
 
   <script src="/static/show.js"></script>

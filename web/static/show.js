@@ -30,16 +30,29 @@
 
   // ----- rendering -----
 
+  // Anything from cues.json lands in innerHTML, so it goes through here first.
+  // The text is typed by a human in the editor, but "<" in a line would still
+  // silently eat the rest of the card.
+  function esc(s) {
+    return String(s == null ? "" : s)
+      .replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;")
+      .replace(/"/g, "&quot;");
+  }
+
+  // A div, not a button: the card carries its own Edit button, and a button
+  // inside a button is invalid HTML that browsers "fix" unpredictably.
+  // role/tabindex keep it keyboard-reachable the way the old element was.
   function cueCard(cue) {
-    const node = document.createElement("button");
+    const node = document.createElement("div");
     const audio = cue.has_audio;
     node.className =
-      "cue text-left rounded-lg px-3 py-2 border w-full " +
+      "cue relative text-left rounded-lg border w-full cursor-pointer " +
       (audio
         ? "bg-slate-800 border-slate-600 hover:bg-slate-700"
         : "bg-slate-800/50 border-slate-700 hover:bg-slate-700/60");
     node.dataset.cueId = cue.id;
-    node.onclick = () => fire(cue.id);
+    node.setAttribute("role", "button");
+    node.setAttribute("tabindex", "0");
 
     const dur = cue.duration_s ? `${cue.duration_s.toFixed(1)}s` : "";
     const motion = cue.motion
@@ -48,17 +61,33 @@
     const missing = audio && !cue.audio_ready;
 
     node.innerHTML = `
-      <div class="flex items-center gap-2">
-        <span class="key">${cue.hotkey || "·"}</span>
-        <span class="font-medium text-sm">${cue.label}</span>
-        <span class="ml-auto text-[11px] font-mono text-slate-400">${dur}</span>
+      <div class="px-3 py-2 pr-12 fire-target">
+        <div class="flex items-center gap-2">
+          <span class="key">${esc(cue.hotkey || "·")}</span>
+          <span class="font-medium text-sm">${esc(cue.label)}</span>
+          <span class="ml-auto text-[11px] font-mono text-slate-400">${dur}</span>
+        </div>
+        ${cue.text ? `<div class="rtl mt-1.5 text-sm text-slate-300 leading-snug">${esc(cue.text)}</div>` : ""}
+        <div class="mt-1.5 flex items-center gap-2 text-[11px] text-slate-400">
+          ${motion ? `<span class="px-1.5 py-0.5 rounded bg-slate-700">${esc(motion)}</span>` : ""}
+          ${audio ? "" : `<span class="px-1.5 py-0.5 rounded bg-slate-700">motion only</span>`}
+          ${missing ? `<span class="px-1.5 py-0.5 rounded bg-red-700 text-white">no audio — press Rebuild</span>` : ""}
+        </div>
       </div>
-      ${cue.text ? `<div class="rtl mt-1.5 text-sm text-slate-300 leading-snug">${cue.text}</div>` : ""}
-      <div class="mt-1.5 flex items-center gap-2 text-[11px] text-slate-400">
-        ${motion ? `<span class="px-1.5 py-0.5 rounded bg-slate-700">${motion}</span>` : ""}
-        ${audio ? "" : `<span class="px-1.5 py-0.5 rounded bg-slate-700">motion only</span>`}
-        ${missing ? `<span class="px-1.5 py-0.5 rounded bg-red-700 text-white">no audio — run build_show.py</span>` : ""}
-      </div>`;
+      <button class="edit-btn absolute top-1.5 right-1.5 px-2 py-0.5 rounded text-[11px]
+                     bg-slate-700/80 hover:bg-sky-600 text-slate-200 border border-slate-600"
+              title="Edit this cue">edit</button>`;
+
+    node.querySelector(".fire-target").onclick = () => fire(cue.id);
+    node.onkeydown = (ev) => {
+      if (ev.key === "Enter" || ev.key === " ") { ev.preventDefault(); fire(cue.id); }
+    };
+    node.querySelector(".edit-btn").onclick = (ev) => {
+      // Without this the click also reaches the card and fires the cue —
+      // Reachy announcing a line to the room because you meant to reword it.
+      ev.stopPropagation();
+      openEditor(cue);
+    };
     return node;
   }
 
@@ -84,9 +113,157 @@
         list.appendChild(cueCard(cue));
       });
       card.appendChild(list);
+
+      const add = document.createElement("button");
+      add.className = "mt-2 w-full rounded-lg border border-dashed border-slate-600 " +
+                      "text-slate-400 hover:text-slate-100 hover:border-slate-400 " +
+                      "text-sm py-1.5";
+      add.textContent = "+ add cue";
+      add.onclick = () => openEditor(null, section.id);
+      card.appendChild(add);
+
       el.board.appendChild(card);
     });
     markPointer();
+  }
+
+  // ----- editing -------------------------------------------------------
+
+  let editing = null;         // {cue, sectionId} or null when closed
+  let motions = null;         // catalog, fetched lazily
+
+  async function loadMotions() {
+    if (motions) return motions;
+    try {
+      motions = await (await fetch("/api/show/motions")).json();
+    } catch {
+      motions = { emotions: [], dances: [], directions: [] };
+    }
+    return motions;
+  }
+
+  async function openEditor(cue, sectionId) {
+    await loadMotions();
+    editing = { cue: cue || null, sectionId: sectionId || (cue && cue.section) };
+    const m = (cue && cue.motion) || {};
+    $("ed-title").textContent = cue ? `Edit — ${cue.label}` : "New cue";
+    $("ed-label").value = cue ? (cue.label || "") : "";
+    $("ed-text").value = cue ? (cue.text || "") : "";
+    $("ed-hotkey").value = cue ? (cue.hotkey || "") : "";
+    $("ed-boss").value = cue ? (cue.boss_cue || "") : "";
+    $("ed-motion-type").value = m.type || "";
+    fillMotionNames(m.type || "", m.name || m.direction || "");
+    $("ed-delete").classList.toggle("hidden", !cue);
+    $("ed-error").textContent = "";
+    $("ed-modal").classList.remove("hidden");
+    setTimeout(() => $("ed-text").focus(), 30);
+  }
+
+  function fillMotionNames(type, selected) {
+    const sel = $("ed-motion-name");
+    let opts = [];
+    if (type === "emotion") opts = motions.emotions;
+    else if (type === "dance") opts = motions.dances;
+    else if (type === "head") opts = motions.directions;
+    sel.innerHTML = opts.map((n) =>
+      `<option value="${esc(n)}"${n === selected ? " selected" : ""}>${esc(n)}</option>`
+    ).join("");
+    sel.disabled = opts.length === 0;
+    sel.classList.toggle("opacity-40", opts.length === 0);
+  }
+
+  function closeEditor() {
+    editing = null;
+    $("ed-modal").classList.add("hidden");
+  }
+
+  function editorPayload() {
+    const type = $("ed-motion-type").value;
+    const name = $("ed-motion-name").value;
+    let motion = null;
+    if (type === "head") motion = { type: "head", direction: name };
+    else if (type) motion = { type, name };
+    return {
+      label: $("ed-label").value,
+      text: $("ed-text").value,
+      hotkey: $("ed-hotkey").value,
+      boss_cue: $("ed-boss").value,
+      motion: motion,
+    };
+  }
+
+  async function saveEditor() {
+    if (!editing) return;
+    const busy = (on) => {
+      $("ed-save").disabled = on;
+      $("ed-save").textContent = on ? "saving + re-recording…" : "Save";
+    };
+    $("ed-error").textContent = "";
+    busy(true);
+    try {
+      const payload = editorPayload();
+      let r;
+      if (editing.cue) {
+        r = await fetch(`/api/show/cue/${encodeURIComponent(editing.cue.id)}`, {
+          method: "PUT",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(payload),
+        });
+      } else {
+        r = await fetch("/api/show/cue", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ ...payload, section_id: editing.sectionId }),
+        });
+      }
+      const body = await r.json().catch(() => ({}));
+      if (!r.ok) { $("ed-error").textContent = body.error || `HTTP ${r.status}`; return; }
+      render(body);
+      closeEditor();
+    } catch (e) {
+      $("ed-error").textContent = String(e);
+    } finally {
+      busy(false);
+    }
+  }
+
+  async function deleteEditing() {
+    if (!editing || !editing.cue) return;
+    const label = editing.cue.label || editing.cue.id;
+    if (!confirm(`Delete "${label}"? Its recording is deleted too.`)) return;
+    try {
+      const r = await fetch(`/api/show/cue/${encodeURIComponent(editing.cue.id)}`,
+                            { method: "DELETE" });
+      const body = await r.json().catch(() => ({}));
+      if (!r.ok) { $("ed-error").textContent = body.error || `HTTP ${r.status}`; return; }
+      render(body);
+      closeEditor();
+    } catch (e) {
+      $("ed-error").textContent = String(e);
+    }
+  }
+
+  async function rebuildAll() {
+    const btn = $("rebuild-btn");
+    btn.disabled = true;
+    const was = btn.textContent;
+    btn.textContent = "rebuilding…";
+    try {
+      const r = await fetch("/api/show/rebuild", { method: "POST" });
+      const body = await r.json().catch(() => ({}));
+      if (!r.ok) { showError(body.error || `HTTP ${r.status}`); return; }
+      render(body);
+      const n = (body.built || []).length;
+      const failed = (body.failed || []).length;
+      el.npLabel.textContent = failed
+        ? `rebuilt ${n}, ${failed} failed — see the log`
+        : (n ? `rebuilt ${n} line${n === 1 ? "" : "s"}` : "everything already up to date");
+    } catch (e) {
+      showError(String(e));
+    } finally {
+      btn.disabled = false;
+      btn.textContent = was;
+    }
   }
 
   function markPointer() {
@@ -192,7 +369,17 @@
   // ----- keyboard -----
 
   document.addEventListener("keydown", (ev) => {
-    if (ev.target && ["INPUT", "TEXTAREA"].includes(ev.target.tagName)) return;
+    // While the editor is open the keyboard belongs to it. Otherwise typing a
+    // Hebrew line would fire cues on every keystroke that matches a hotkey,
+    // and Escape would mean two different things at once.
+    if (editing) {
+      if (ev.key === "Escape") { ev.preventDefault(); closeEditor(); }
+      if (ev.key === "Enter" && (ev.ctrlKey || ev.metaKey)) {
+        ev.preventDefault(); saveEditor();
+      }
+      return;
+    }
+    if (ev.target && ["INPUT", "TEXTAREA", "SELECT"].includes(ev.target.tagName)) return;
     if (ev.key === "Escape") {
       ev.preventDefault();
       stopAll();
@@ -223,6 +410,13 @@
     const r = await fetch("/api/show/reload", { method: "POST" });
     render(await r.json());
   };
+  $("rebuild-btn").onclick = rebuildAll;
+  $("ed-save").onclick = saveEditor;
+  $("ed-cancel").onclick = closeEditor;
+  $("ed-delete").onclick = deleteEditing;
+  $("ed-motion-type").onchange = (ev) => fillMotionNames(ev.target.value, "");
+  // Click the backdrop to dismiss, but not a click inside the panel.
+  $("ed-modal").onclick = (ev) => { if (ev.target === $("ed-modal")) closeEditor(); };
 
   // ----- websocket (shared with the dashboard) -----
 
