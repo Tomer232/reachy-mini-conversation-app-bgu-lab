@@ -369,6 +369,7 @@ class GptLiveSession:
     # ----- background tasks -----
 
     async def _reader(self, ws) -> None:
+        carry = b""   # a split 16-bit sample, should a delta ever end mid-sample
         try:
             async for raw in ws:
                 msg = _parse(raw)
@@ -376,7 +377,11 @@ class GptLiveSession:
                 if kind == "session.output_audio.delta":
                     data = msg.get("delta") or ""
                     if data:
-                        self._events.put_nowait(("audio", base64.b64decode(data)))
+                        pcm = carry + base64.b64decode(data)
+                        cut = len(pcm) & ~1
+                        carry = pcm[cut:]
+                        if cut:
+                            self._events.put_nowait(("audio", pcm[:cut]))
                 elif kind == "session.input_transcript.delta":
                     if msg.get("delta"):
                         self._events.put_nowait(("user_text", msg["delta"]))

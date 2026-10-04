@@ -2273,8 +2273,9 @@ class Conversation:
 
                         t_send_start = time.perf_counter()
                         # Trailing silence for a model that endpoints on its
-                        # own VAD (Gemini 3.8 -- see providers/gemini.py).
-                        # Zero-length for 3.1, so its bytes are unchanged.
+                        # own VAD (both Gemini models as of 2026-10 -- see
+                        # providers/gemini.py). Zero-length when a provider
+                        # asks for none, so its bytes are unchanged.
                         send_audio = (np.concatenate([mic_audio, tail_pad])
                                       if tail_pad.size else mic_audio)
                         try:
