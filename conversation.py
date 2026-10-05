@@ -136,10 +136,32 @@ SYSTEM_PROMPT_EN = (
     "Use at most one tool per reply."
 )
 
-# language id (the dashboard's) -> (base prompt, BCP-47 code)
+# "Auto": follow whoever is speaking. Written in both languages so neither
+# reads as the model's "real" one; Hebrew is the tiebreak because it is this
+# robot's home language. The risk is a short or noisy turn misheard as the
+# other language (a Hebrew laugh came back as German "Ja, fein" in testing) --
+# which is why this is an option, not the default.
+SYSTEM_PROMPT_AUTO = (
+    "אתה Reachy Mini, רובוט שולחני קטן וידידותי. "
+    "You are Reachy Mini, a small, friendly desktop robot. "
+    "ענה תמיד באותה שפה שבה המשתמש דיבר עכשיו — עברית או אנגלית. "
+    "Always reply in the language the user just spoke: Hebrew or English. "
+    "If the user switches language, switch with them. If you are unsure, "
+    "reply in Hebrew. Never use any other language. "
+    "Keep replies short, one or two sentences. Be warm and curious. "
+    "If the user says they want to end the conversation, say a short, warm "
+    "goodbye. "
+    "You can perform movements and emotions during the conversation. Use the "
+    "play_emotion, dance and move_head tools when it fits -- not in every "
+    "sentence. Use at most one tool per reply."
+)
+
+# language id (the dashboard's) -> (base prompt, BCP-47 code). "auto" carries
+# no code: the provider leaves the language to the model.
 LANGUAGES = {
     "he": (SYSTEM_PROMPT, "he-IL"),
     "en": (SYSTEM_PROMPT_EN, "en-US"),
+    "auto": (SYSTEM_PROMPT_AUTO, "auto"),
 }
 DEFAULT_LANGUAGE = "he"
 

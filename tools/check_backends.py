@@ -46,7 +46,7 @@ def all_combos() -> list:
     import providers
     out = []
     for b in providers.BRAINS:
-        for lang in ("he", "en"):
+        for lang in ("he", "en", "auto"):
             out.append("{}:{}".format(b["id"], lang))
     for b in providers.BRAINS:
         out.append("{}:he+el".format(b["id"]))
@@ -80,7 +80,10 @@ def parse_combo(text: str) -> dict:
 async def run_combo(combo: dict, port: int, play: bool, timeout_s: float) -> dict:
     import websockets
     lang = combo["language"]
-    wavs = [str(AUDIO / "{}_{}.wav".format(lang, i)) for i in (1, 2, 3)]
+    # Auto switches language every turn: Hebrew, English, Hebrew goodbye.
+    langs = ["he", "en", "he"] if lang == "auto" else [lang] * 3
+    wavs = [str(AUDIO / "{}_{}.wav".format(l, i)) for l, i in zip(langs, (1, 2, 3))]
+    result_langs = langs
     cmd = [PY, "-u", str(ROOT / "tools" / "dry_run.py"), "--no-browser",
            "--port", str(port)]
     if not play:
@@ -167,7 +170,19 @@ async def run_combo(combo: dict, port: int, play: bool, timeout_s: float) -> dic
     with_audio = [t for t in result["turns"] if t.get("audio_s", 0) > 0.3]
     result["ok"] = (len(replied) >= 3 and len(with_audio) >= 3
                     and result["ended"] == "end_phrase")
+    # Every reply must be in the language that turn was spoken in.
+    for t, want in zip(result["turns"], result_langs):
+        got = "he" if _is_hebrew(t.get("robot", "")) else "en"
+        if t.get("robot") and got != want:
+            result["ok"] = False
+            result["errors"].append("turn {}: spoken in {}, answered in {}".format(
+                t["turn"], want, got))
     return result
+
+
+def _is_hebrew(text: str) -> bool:
+    letters = [c for c in text if c.isalpha()]
+    return bool(letters) and sum("\u0590" <= c <= "\u05ff" for c in letters) > len(letters) / 2
 
 
 def _add_timings(result: dict, conv_dir: Path) -> None:

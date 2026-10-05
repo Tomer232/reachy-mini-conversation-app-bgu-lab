@@ -36,6 +36,7 @@ BACKEND_PATH = SCRIPT_DIR / "backend.json"
 LANGUAGES = (
     {"id": "he", "label": "עברית"},
     {"id": "en", "label": "English"},
+    {"id": "auto", "label": "Auto (עברית / English)"},
 )
 
 
@@ -106,7 +107,7 @@ class BackendStore:
         if language is not None:
             language = str(language).strip().lower()
             if language not in {l["id"] for l in LANGUAGES}:
-                raise ValueError("language must be one of: he, en")
+                raise ValueError("language must be one of: he, en, auto")
             s.language = language
         if elevenlabs is not None:
             s.elevenlabs = bool(elevenlabs)

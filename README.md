@@ -47,7 +47,7 @@ applies to the *next* conversation and survives a restart (`backend.json`).
 | Control | Options |
 |---|---|
 | Brain | **Gemini 3.8 Live** (default, Google's current model) · Gemini 3.1 Flash Live (previous) · **OpenAI GPT-Live-1** |
-| Language | עברית · English |
+| Language | עברית · English · **Auto** (replies in whichever of the two you just spoke; Hebrew when unsure) |
 | ElevenLabs v4 voice | Off, or on with a voice from the ElevenLabs account. The brain still listens, thinks and gestures; the robot speaks with ElevenLabs (`eleven_v4_turbo`). If ElevenLabs cannot be reached, that turn falls back to the brain's own voice and the log says why. |
 
 **Keys.** Gemini's is found as before. OpenAI and ElevenLabs go in

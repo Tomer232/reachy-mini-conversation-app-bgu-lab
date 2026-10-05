@@ -118,7 +118,9 @@ class GeminiProvider(SpeechProvider):
             output_audio_transcription=types.AudioTranscriptionConfig(),
             system_instruction=system_prompt,
             speech_config=types.SpeechConfig(
-                language_code=language or self.default_language,
+                # "auto": no code, so the model follows the speaker.
+                language_code=(None if language == "auto"
+                               else language or self.default_language),
                 voice_config=types.VoiceConfig(
                     prebuilt_voice_config=types.PrebuiltVoiceConfig(
                         voice_name=voice or self.default_voice

@@ -70,7 +70,12 @@ INVARIANTS_EN = (
     "keep replies to a sentence or two, and use at most one movement tool "
     "per reply."
 )
-INVARIANTS = {"he": INVARIANTS_HE, "en": INVARIANTS_EN}
+INVARIANTS_AUTO = (
+    "Important, even with the character above: always reply in the language "
+    "the user just spoke (Hebrew or English), keep replies to a sentence or "
+    "two, and use at most one movement tool per reply."
+)
+INVARIANTS = {"he": INVARIANTS_HE, "en": INVARIANTS_EN, "auto": INVARIANTS_AUTO}
 
 # Voices, per provider.
 #
