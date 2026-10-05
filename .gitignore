@@ -34,3 +34,5 @@ show/backups/
 # === Per-laptop choices and secrets written by the dashboard ===
 keys.json
 backend.json
+openai_key.txt
+elevenlabs_key.txt

@@ -55,6 +55,10 @@ PROVIDERS = (GEMINI, GPT_LIVE, ELEVENLABS)
 _ENV_FALLBACK = {GEMINI: "GEMINI_API_KEY", GPT_LIVE: "OPENAI_API_KEY",
                  ELEVENLABS: "ELEVENLABS_API_KEY"}
 
+# One-line key files beside the app, git-ignored.
+KEY_FILES = {GPT_LIVE: SCRIPT_DIR / "openai_key.txt",
+             ELEVENLABS: SCRIPT_DIR / "elevenlabs_key.txt"}
+
 # Set by robot-hub at launch; see resolve().
 HUB_KEY_ENV = "REACHY_HUB_KEY"
 HUB_KEY_ID_ENV = "REACHY_HUB_KEY_ID"
@@ -240,6 +244,16 @@ def resolve(provider: Optional[str] = None,
     if key:
         return Credential(provider=provider, key=key, key_id="",
                           label="environment", source="env " + env_name)
+
+    # Last: a one-line file holding nothing but the key (openai_key.txt,
+    # elevenlabs_key.txt). The easiest thing to paste into -- a JSON file in a
+    # right-to-left Notepad is not.
+    key_file = KEY_FILES.get(provider)
+    if key_file is not None and key_file.is_file():
+        key = key_file.read_text(encoding="utf-8-sig").strip()
+        if key:
+            return Credential(provider=provider, key=key, key_id="",
+                              label=key_file.name, source=key_file.name)
 
     raise NoCredential(
         "no {} key on this robot. Give it one of: a keys.json entry, the {} "

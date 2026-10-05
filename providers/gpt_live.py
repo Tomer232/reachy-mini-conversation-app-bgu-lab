@@ -196,6 +196,15 @@ class GptLiveSession:
                 additional_headers={"Authorization": "Bearer " + self._key},
                 max_size=None, open_timeout=START_TIMEOUT_S)
         except Exception as e:
+            status = getattr(getattr(e, "response", None), "status_code", None)
+            if status == 401:
+                raise ProviderUnavailable(
+                    "OpenAI rejected the API key (401: invalid or revoked key). "
+                    "Make a new one at platform.openai.com/api-keys") from e
+            if status == 403:
+                raise ProviderUnavailable(
+                    "OpenAI refused access to gpt-live-1 for this key (403) -- "
+                    "check the project's model access and billing tier") from e
             raise ProviderUnavailable(
                 "could not reach OpenAI's live endpoint: {}".format(e)) from e
         await ws.send(json.dumps({"type": "session.start",
