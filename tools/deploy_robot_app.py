@@ -62,6 +62,8 @@ FILES = [
     "motion_director.py",
     # Camera vision: frames from the daemon's camera socket to the brain.
     "vision.py",
+    # "Add WiFi..." on the dashboard: saves a hotspot without switching.
+    "wifi_networks.py",
     "vad.py",
     "vad_onnx.py",
     "local_transport.py",

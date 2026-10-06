@@ -109,6 +109,35 @@ def create_app(manager: SystemManager, broadcaster) -> FastAPI:
             return JSONResponse(status_code=409,
                                 content={"error": "invalid_state", "state": e.state})
 
+    # ----- WiFi networks the robot remembers (wifi_networks.py) -----
+    # Saves a lab member's hotspot without switching to it, so the robot
+    # moves to it by itself once the current hotspot is off.
+
+    @app.get("/api/wifi")
+    async def api_wifi():
+        import conversation as conv_mod
+        import wifi_networks
+        if not conv_mod.LOCAL_ROBOT:
+            return {"available": False, "networks": [],
+                    "reason": "only when reachy_chat runs on the robot"}
+        try:
+            return {"available": True, "networks": await asyncio.to_thread(wifi_networks.saved)}
+        except wifi_networks.WifiError as e:
+            return {"available": False, "networks": [], "reason": str(e)}
+
+    @app.post("/api/wifi")
+    async def api_wifi_save(body: dict = Body(...)):
+        import conversation as conv_mod
+        import wifi_networks
+        if not conv_mod.LOCAL_ROBOT:
+            return JSONResponse(status_code=409, content={
+                "error": "only when reachy_chat runs on the robot"})
+        try:
+            return await asyncio.to_thread(
+                wifi_networks.save, str(body.get("ssid", "")), str(body.get("password", "")))
+        except wifi_networks.WifiError as e:
+            return JSONResponse(status_code=400, content={"error": str(e)})
+
     # ----- show mode (operator board) -----
 
     # ----- identity and the persona switch -----

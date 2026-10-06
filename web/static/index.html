@@ -70,6 +70,20 @@
           </div>
           <div class="text-sm text-slate-500 mt-1">IP: <span id="robot-ip">—</span></div>
           <div class="text-sm text-slate-500">Daemon: <span id="robot-daemon">—</span></div>
+          <!-- Add a lab member's hotspot (wifi.js). Saved, not switched to:
+               the robot moves to it once the current hotspot is off. -->
+          <button id="wifi-open" type="button" class="btn btn-slate mt-2 w-full"
+                  title="Teach this robot another WiFi (e.g. a student's hotspot)">Add WiFi…</button>
+          <div id="wifi-panel" class="hidden mt-2 flex flex-col gap-2">
+            <input id="wifi-ssid" type="text" autocomplete="off" placeholder="Hotspot name"
+                   class="border border-slate-300 rounded px-2 py-1 text-sm">
+            <input id="wifi-pass" type="password" autocomplete="off" placeholder="Password"
+                   class="border border-slate-300 rounded px-2 py-1 text-sm">
+            <button id="wifi-save" type="button" class="btn btn-primary">Save on robot</button>
+            <div id="wifi-msg" class="text-xs text-slate-500"></div>
+            <div class="text-xs text-slate-500">Knows:</div>
+            <ul id="wifi-list" class="text-xs text-slate-600 list-disc pl-4"></ul>
+          </div>
         </div>
 
         <!-- System Controls -->
@@ -222,5 +236,6 @@
   </main>
 
   <script src="/static/app.js"></script>
+  <script src="/static/wifi.js"></script>
 </body>
 </html>
