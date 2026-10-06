@@ -58,6 +58,15 @@ def create_app(manager: SystemManager, broadcaster) -> FastAPI:
 
     app = FastAPI(title="Reachy Mini Handler Dashboard", lifespan=lifespan)
 
+    @app.middleware("http")
+    async def no_stale_page(request, call_next):
+        """Every Launch can ship a new page; without this a browser kept the
+        old one and the new volume bar never appeared (2026-10-05)."""
+        response = await call_next(request)
+        if not request.url.path.startswith("/api/"):
+            response.headers["Cache-Control"] = "no-cache"
+        return response
+
     @app.get("/api/status")
     async def api_status():
         return manager.status()
@@ -149,8 +158,8 @@ def create_app(manager: SystemManager, broadcaster) -> FastAPI:
     @app.put("/api/backend")
     async def api_backend_update(body: dict = Body(...)):
         """Only the fields sent move. Applies to the next conversation."""
-        allowed = ("brain", "language", "elevenlabs", "el_voice_id",
-                   "el_voice_name", "el_model")
+        allowed = ("brain", "language", "voice", "elevenlabs", "el_voice_id",
+                   "el_voice_name", "el_model", "vision")
         changes = {k: body[k] for k in allowed if k in body}
         if not changes:
             return JSONResponse(
@@ -162,6 +171,21 @@ def create_app(manager: SystemManager, broadcaster) -> FastAPI:
         except (ValueError, ProviderUnavailable) as e:
             return JSONResponse({"error": "rejected", "detail": str(e)},
                                 status_code=400)
+
+    @app.get("/api/volume")
+    async def api_volume():
+        return await manager.get_volume()
+
+    @app.put("/api/volume")
+    async def api_volume_set(body: dict = Body(...)):
+        """{"level": 0-150}. Above 100 boosts the speech itself."""
+        try:
+            return await manager.set_volume(int(body.get("level")))
+        except (TypeError, ValueError):
+            return JSONResponse({"error": "rejected", "detail": "level must be 0-150"},
+                                status_code=400)
+        except RuntimeError as e:
+            return JSONResponse({"error": "robot", "detail": str(e)}, status_code=502)
 
     @app.get("/api/backend/elevenlabs/voices")
     async def api_elevenlabs_voices(refresh: bool = False):

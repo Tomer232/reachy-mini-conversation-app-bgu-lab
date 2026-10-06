@@ -2,7 +2,8 @@
 """Synthesize the spoken test turns tools/check_backends.py plays as the mic.
 
 Writes tools/test_audio/{he,en}_{1,2,3}.wav at 16 kHz mono: a question, a
-follow-up, and a goodbye (which exercises the end-phrase path). Uses Gemini
+follow-up, and a goodbye (which exercises the end-phrase path); and
+{he,en}_see.wav, a question about what the camera sees. Uses Gemini
 TTS with the Gemini key, so it needs no other provider. Run once; the files
 are small and checked in, so a fresh checkout has them without a key.
 """
@@ -31,6 +32,10 @@ PHRASES = {
     "en_1": "Hi Reachy, can you tell me a short joke?",
     "en_2": "Ha, nice one. What do you like doing most?",
     "en_3": "Thanks a lot, goodbye!",
+    # Camera vision (vision.py): asked with a picture standing in for the
+    # camera (REACHY_CAMERA_IMAGE).
+    "he_see": "ריצ'י, אתה רואה אותי? מה אני לובשת ומה אני מחזיקה?",
+    "en_see": "Reachy, can you see me? What am I wearing, and what am I holding?",
 }
 
 

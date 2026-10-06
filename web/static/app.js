@@ -32,6 +32,8 @@
     chatConvIdSpan: $("chat-conv-id").querySelector("span"),
     robotName: $("robot-name"),
     robotBadges: $("robot-badges"),
+    volumeBar: $("volume-bar"),
+    volumeValue: $("volume-value"),
     personaToggle: $("persona-toggle"),
     personaPanel: $("persona-panel"),
     personaSummary: $("persona-summary"),
@@ -47,6 +49,11 @@
     backendLanguage: $("backend-language"),
     backendEl: $("backend-el"),
     backendElVoice: $("backend-el-voice"),
+    backendVoice: $("backend-voice"),
+    backendVoiceRow: $("backend-voice-row"),
+    backendElWarning: $("backend-el-warning"),
+    backendVision: $("backend-vision"),
+    backendVisionNote: $("backend-vision-note"),
     backendMsg: $("backend-msg"),
   };
 
@@ -413,6 +420,9 @@
           appendLogLine("INFO", "client", "conversation on " + m.backend);
         }
         break;
+      case "volume.change":
+        showVolume(m);
+        break;
       case "backend.change":
         setBackend(m);
         break;
@@ -662,8 +672,22 @@
     fillOptions(el.backendLanguage,
       (b.languages || []).map((x) => ({ value: x.id, label: x.label })),
       b.language);
+    // The brain's own voice; ElevenLabs replaces it, so it hides while that is on.
+    fillOptions(el.backendVoice,
+      (b.voices || []).map((v) => ({ value: v, label: v })),
+      b.voice || "",
+      "Default (" + (b.default_voice || "provider's") + ")");
     const elv = b.elevenlabs || {};
     el.backendEl.checked = !!elv.enabled;
+    el.backendVoiceRow.classList.toggle("hidden", !!elv.enabled || !(b.voices || []).length);
+    el.backendElWarning.classList.toggle("hidden", !b.el_not_recommended);
+    const vis = b.vision || {};
+    el.backendVision.checked = !!vis.enabled;
+    el.backendVisionNote.textContent = !vis.enabled ? ""
+      : vis.available ? (vis.source + " · " + (vis.how || ""))
+      : (vis.source || "no camera here");
+    el.backendVisionNote.title = el.backendVisionNote.textContent;
+    el.backendVisionNote.classList.toggle("text-amber-700", !!vis.enabled && !vis.available);
     el.backendElVoice.classList.toggle("hidden", !elv.enabled);
     if (elv.enabled && !elVoicesLoaded) loadElVoices(false);
     else if (elv.enabled) el.backendElVoice.value = elv.voice_id || "";
@@ -725,7 +749,9 @@
 
   el.backendBrain.onchange = () => sendBackend({ brain: el.backendBrain.value });
   el.backendLanguage.onchange = () => sendBackend({ language: el.backendLanguage.value });
+  el.backendVoice.onchange = () => sendBackend({ voice: el.backendVoice.value });
   el.backendEl.onchange = () => sendBackend({ elevenlabs: el.backendEl.checked });
+  el.backendVision.onchange = () => sendBackend({ vision: el.backendVision.checked });
   el.backendElVoice.onchange = () => {
     const opt = el.backendElVoice.selectedOptions[0];
     sendBackend({
@@ -733,6 +759,38 @@
       el_voice_name: el.backendElVoice.value && opt ? opt.textContent : "",
     });
   };
+
+  // ---- volume bar ----------------------------------------------------------
+
+  function showVolume(v) {
+    if (!v || v.level == null) return;
+    el.volumeBar.max = v.max || 150;
+    if (document.activeElement !== el.volumeBar) el.volumeBar.value = v.level;
+    el.volumeValue.textContent = v.level + "%";
+    el.volumeValue.classList.toggle("text-amber-700", v.level > 100);
+  }
+
+  let volumeTimer = null;
+  el.volumeBar.oninput = () => {
+    const level = Number(el.volumeBar.value);
+    el.volumeValue.textContent = level + "%";
+    el.volumeValue.classList.toggle("text-amber-700", level > 100);
+    clearTimeout(volumeTimer);           // send once the hand stops moving
+    volumeTimer = setTimeout(async () => {
+      try {
+        const r = await fetch("/api/volume", {
+          method: "PUT", headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ level }),
+        });
+        showVolume(await r.json());
+      } catch (e) { /* the next load shows the real level */ }
+    }, 250);
+  };
+
+  async function loadVolume() {
+    try { showVolume(await (await fetch("/api/volume")).json()); } catch (e) { /* robot not answering yet */ }
+  }
+  loadVolume();
 
   async function loadBackend() {
     try { setBackend(await (await fetch("/api/backend")).json()); } catch (e) { /* WS snapshot has it too */ }

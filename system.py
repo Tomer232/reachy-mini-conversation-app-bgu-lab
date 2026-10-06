@@ -430,7 +430,10 @@ class SystemManager:
         except Exception as e:
             log.exception("Conversation crashed")
             reason = "crash"
-            self._broadcast({"event": "error", "where": "gemini",
+            # Name the backend that failed: a GPT-Live refusal used to be
+            # labelled "gemini" on the dashboard (2026-10-05).
+            where = getattr(getattr(conv, "provider", None), "name", "") or "conversation"
+            self._broadcast({"event": "error", "where": where,
                              "message": f"{type(e).__name__}: {e}"})
         finally:
             conv_mod.set_substate_hook(None)
@@ -624,7 +627,8 @@ class SystemManager:
         return SessionSpec(
             provider=provider,
             system_prompt=self.persona.prompt_for(base_prompt, choice.language),
-            voice=self.persona.voice_for(provider.default_voice),
+            voice=(choice.voices.get(provider.name)
+                   or self.persona.voice_for(provider.default_voice)),
             language=language_code,
             model=brain["model"],
             persona_summary=state.summary(),
@@ -632,6 +636,7 @@ class SystemManager:
             credential=credential.public() if credential else {},
             voice_layer=voice_layer,
             brain_id=brain["id"],
+            vision=choice.vision,
         )
 
     # ----- the backend picker -----
@@ -742,16 +747,26 @@ class SystemManager:
             note = ""
             if b["provider"] == "gpt_live":
                 note = ("Hebrew is unverified on GPT-Live (OpenAI publishes no "
-                        "language list). No motion tools: it talks and sways only.")
+                        "language list). Its gestures are picked from what it says "
+                        "by a small side model, a moment behind Gemini's.")
             brains.append({**b, "key_ok": key["ok"],
                            "key_error": key.get("error", ""),
                            "key_label": key.get("label", ""),
                            "key_tail": key.get("tail", ""),
                            "note": note})
         el_key = self._key_status(creds_mod.ELEVENLABS)
+        provider = self._selected_provider()
+        import vision as vision_mod
+        cam_kind, cam_label = vision_mod.camera_source()
         return {
             "brain": choice.brain,
             "brains": brains,
+            # The brain's own voice, for the selected brain's provider.
+            "voice": choice.voices.get(provider.name, ""),
+            "voices": list(provider.voices),
+            "default_voice": self.persona.voice_for(provider.default_voice),
+            # ElevenLabs over GPT-Live stutters; the page says so in red.
+            "el_not_recommended": provider.name == "gpt_live",
             "language": choice.language,
             "languages": list(LANGUAGES),
             "elevenlabs": {
@@ -762,6 +777,15 @@ class SystemManager:
                 "voice_name": choice.el_voice_name,
                 "model": choice.el_model,
                 "models": list(elevenlabs_voice.MODELS),
+            },
+            # Camera vision: the switch, and whether this process has a
+            # camera at all (it does on the robot; on the laptop it does not).
+            "vision": {
+                "enabled": choice.vision and vision_mod.ENABLED,
+                "available": bool(cam_kind),
+                "source": cam_label,
+                "how": ("described for the model by " + vision_mod.DESCRIBE_MODEL
+                        if provider.name == "gpt_live" else "the model sees the frames"),
             },
             "applies_next": self.state == SystemState.CONVERSATION_RUNNING,
         }
@@ -774,6 +798,44 @@ class SystemManager:
         self._broadcast({"event": "backend.change", **payload})
         self._broadcast({"event": "persona.change", **self.persona_payload()})
         self._broadcast({"event": "identity.change", **self.identity_payload()})
+        return payload
+
+    # ----- the volume bar -----
+    # 0-100 is the speaker's own volume (the daemon); 101-150 keeps the
+    # speaker at 100 and boosts the speech signal (conversation.OUTPUT_GAIN).
+
+    VOLUME_MAX = 150
+
+    async def get_volume(self) -> dict:
+        hw = None
+        try:
+            async with httpx.AsyncClient(timeout=3.0) as client:
+                r = await client.get(f"http://{self.robot_host}:8000/api/volume/current")
+                hw = int(r.json().get("volume"))
+        except Exception as e:  # noqa: BLE001
+            log.warning("could not read the robot's volume: %s", e)
+        gain = float(conv_mod.OUTPUT_GAIN)
+        level = (hw if hw is not None else 100)
+        if gain > 1.0 and (hw is None or hw >= 100):
+            level = int(round(100 * gain))
+        return {"level": level, "max": self.VOLUME_MAX,
+                "speaker": hw, "boost": round(gain, 2)}
+
+    async def set_volume(self, level: int) -> dict:
+        level = max(0, min(self.VOLUME_MAX, int(level)))
+        speaker = min(level, 100)
+        conv_mod.OUTPUT_GAIN = max(1.0, min(conv_mod.OUTPUT_GAIN_MAX, level / 100.0))
+        try:
+            async with httpx.AsyncClient(timeout=3.0) as client:
+                await client.post(f"http://{self.robot_host}:8000/api/volume/set",
+                                  json={"volume": speaker})
+        except Exception as e:  # noqa: BLE001
+            log.warning("could not set the robot's volume: %s", e)
+            raise RuntimeError("the robot did not take the volume change") from e
+        log.info("volume %d%% (speaker %d%%, boost x%.2f)", level, speaker,
+                 conv_mod.OUTPUT_GAIN)
+        payload = await self.get_volume()
+        self._broadcast({"event": "volume.change", **payload})
         return payload
 
     def persona_payload(self) -> dict:

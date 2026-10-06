@@ -20,6 +20,15 @@
       <span class="text-slate-400 font-normal">Handler Dashboard</span>
     </h1>
     <span id="robot-badges" class="flex items-center gap-2 text-xs"></span>
+    <!-- Volume: 0-100 is the speaker, above 100 boosts the speech itself
+         (the hub already sets the speaker to 100 on Connect). -->
+    <label class="flex items-center gap-2 text-xs text-slate-500"
+           title="Robot volume. Above 100% boosts the voice itself.">
+      <span>Volume</span>
+      <input id="volume-bar" type="range" min="0" max="150" step="5" value="100"
+             class="w-28 accent-blue-600 cursor-pointer">
+      <span id="volume-value" class="font-mono w-10 text-slate-700">100%</span>
+    </label>
     <!-- The operator board used to be reachable only by typing /show, which is
          not something anyone remembers with an audience waiting. -->
     <a href="/show" target="_blank"
@@ -32,8 +41,10 @@
   <!-- Two columns -->
   <main class="flex-1 min-h-0 flex gap-4 p-4 overflow-hidden">
 
-    <!-- LEFT COLUMN (~58%) -->
-    <section class="flex flex-col gap-4 min-h-0 basis-[58%] shrink-0">
+    <!-- LEFT COLUMN (~58%): controls only. The page never scrolls, so if the
+         open persona panel overflows a short window this column scrolls
+         inside itself instead of pushing anything off-screen. -->
+    <section class="flex flex-col gap-4 min-h-0 basis-[58%] shrink-0 overflow-y-auto">
 
       <!-- Top row: 3 status cards -->
       <div class="grid grid-cols-3 gap-4 shrink-0">
@@ -131,7 +142,7 @@
       <!-- Session Monitor -->
       <div class="card shrink-0">
         <div class="card-title">Session Monitor</div>
-        <div id="session-body" class="mt-2 space-y-1 text-sm opacity-50">
+        <div id="session-body" class="mt-2 flex flex-wrap gap-x-5 gap-y-1 text-sm opacity-50">
           <div>Active Session ID:
             <span id="conv-id" class="font-mono text-slate-700">—</span></div>
           <div>Turn Count:
@@ -147,6 +158,11 @@
             <select id="backend-language" class="field" style="width:auto"
                     title="Conversation language"></select>
           </div>
+          <div id="backend-voice-row" class="flex items-center gap-2">
+            <span class="text-sm text-slate-600 shrink-0">Voice</span>
+            <select id="backend-voice" class="field flex-1"
+                    title="The brain's own voice"></select>
+          </div>
           <div class="flex items-center gap-2">
             <label class="switch" title="Speak with an ElevenLabs v4 voice instead of the brain's own">
               <input type="checkbox" id="backend-el">
@@ -156,13 +172,39 @@
             <select id="backend-el-voice" class="field flex-1 hidden"
                     title="ElevenLabs voice"></select>
           </div>
+          <div id="backend-el-warning" class="text-xs text-red-600 hidden">
+            ElevenLabs is not recommended with GPT-Live-1 — it stutters. Use it with Gemini.
+          </div>
+          <!-- Camera vision (vision.py): the robot sees through its head camera. -->
+          <div class="flex items-center gap-2">
+            <label class="switch" title="Let the robot see through its head camera and talk about what it sees">
+              <input type="checkbox" id="backend-vision">
+              <span class="slider"></span>
+            </label>
+            <span class="text-sm text-slate-600 shrink-0">Camera vision</span>
+            <span id="backend-vision-note" class="text-xs text-slate-400 truncate"></span>
+          </div>
           <div id="backend-msg" class="text-xs text-slate-500"></div>
         </div>
         <button id="action-btn" class="btn btn-primary mt-3 w-full" disabled>…</button>
       </div>
+    </section>
+
+    <!-- RIGHT COLUMN (~42%): chat over log, splitting the full height 3:2.
+         The log used to sit under the left column's cards, and once the
+         backend picker landed there it was pushed below the window. -->
+    <section class="flex flex-col gap-4 min-h-0 flex-1">
+      <div class="card flex flex-col flex-[3] min-h-0">
+        <div class="card-title shrink-0">Live Conversation Stream</div>
+        <div id="chat-conv-id" class="hidden text-xs text-slate-400 mt-1 shrink-0">
+          Conversation: <span class="font-mono"></span>
+        </div>
+        <div id="chat"
+             class="mt-3 flex-1 min-h-0 overflow-y-auto flex flex-col gap-3 pr-1"></div>
+      </div>
 
       <!-- Event Log -->
-      <div class="card flex flex-col flex-1 min-h-0">
+      <div class="card flex flex-col flex-[2] min-h-0">
         <div class="flex items-center justify-between shrink-0">
           <div class="card-title">Event Log</div>
           <div class="flex items-center gap-2">
@@ -175,18 +217,6 @@
         <div id="log"
              class="mt-2 flex-1 min-h-0 overflow-y-auto font-mono text-xs leading-5
                     bg-slate-50 rounded p-2 whitespace-pre-wrap break-words"></div>
-      </div>
-    </section>
-
-    <!-- RIGHT COLUMN (~42%) -->
-    <section class="flex flex-col min-h-0 flex-1">
-      <div class="card flex flex-col h-full min-h-0">
-        <div class="card-title shrink-0">Live Conversation Stream</div>
-        <div id="chat-conv-id" class="hidden text-xs text-slate-400 mt-1 shrink-0">
-          Conversation: <span class="font-mono"></span>
-        </div>
-        <div id="chat"
-             class="mt-3 flex-1 min-h-0 overflow-y-auto flex flex-col gap-3 pr-1"></div>
       </div>
     </section>
   </main>

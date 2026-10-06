@@ -8,8 +8,14 @@ Three small controls by the Start Conversation button:
   * **Language**: Hebrew or English. Picks the base prompt and the language
     code. The persona overlay still layers on top, with its closing
     reminder in the same language.
+  * **Voice**: the brain's own voice, remembered per provider (Gemini and
+    GPT-Live have different voice sets). Blank = the persona's, else the
+    provider default.
   * **ElevenLabs voice**: off, or on with a voice from the account. On means
-    the brain still thinks and the robot speaks with ElevenLabs v4.
+    the brain still thinks and the robot speaks with ElevenLabs v4. Choosing
+    GPT-Live turns it off: ElevenLabs is for Gemini only (Tomer, 2026-10-05).
+  * **Camera vision**: on (the default) or off. On, the robot sees through
+    its head camera and can name what it sees (vision.py).
 
 Like the persona switch, a change applies to the *next* conversation, never
 the one already talking, and it survives a restart (backend.json beside the
@@ -20,7 +26,7 @@ from __future__ import annotations
 
 import json
 import logging
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from datetime import datetime
 from pathlib import Path
 from typing import Optional
@@ -48,6 +54,9 @@ class BackendChoice:
     el_voice_id: str = ""
     el_voice_name: str = ""
     el_model: str = elevenlabs_voice.DEFAULT_MODEL
+    # {provider name: voice}, e.g. {"gemini": "Kore", "gpt_live": "vesper"}
+    voices: dict = field(default_factory=dict)
+    vision: bool = True
     updated_at: str = ""
 
 
@@ -85,6 +94,9 @@ class BackendStore:
         if choice.el_model not in elevenlabs_voice.MODELS:
             choice.el_model = elevenlabs_voice.DEFAULT_MODEL
         choice.elevenlabs = bool(choice.elevenlabs)
+        choice.vision = bool(choice.vision)
+        if not isinstance(choice.voices, dict):
+            choice.voices = {}
         return choice
 
     def save(self) -> None:
@@ -100,10 +112,29 @@ class BackendStore:
                elevenlabs: Optional[bool] = None,
                el_voice_id: Optional[str] = None,
                el_voice_name: Optional[str] = None,
-               el_model: Optional[str] = None) -> BackendChoice:
+               el_model: Optional[str] = None,
+               voice: Optional[str] = None,
+               vision: Optional[bool] = None) -> BackendChoice:
         s = self.state
         if brain is not None:
-            s.brain = providers_mod.brain(str(brain))["id"]   # raises if unknown
+            new = providers_mod.brain(str(brain))   # raises if unknown
+            switched = new["id"] != s.brain
+            s.brain = new["id"]
+            # ElevenLabs is not recommended over GPT-Live (it stutters: the
+            # transcript arrives at speaking pace), so picking GPT-Live turns
+            # it off unless this same request turns it on.
+            if switched and new["provider"] == "gpt_live" and elevenlabs is None:
+                s.elevenlabs = False
+        if voice is not None:
+            provider = providers_mod.brain(s.brain)["provider"]
+            voice = str(voice).strip()
+            if voice:
+                offered = providers_mod.get(provider).voices
+                if offered and voice not in offered:
+                    raise ValueError("'{}' is not a {} voice".format(voice, provider))
+                s.voices[provider] = voice
+            else:
+                s.voices.pop(provider, None)
         if language is not None:
             language = str(language).strip().lower()
             if language not in {l["id"] for l in LANGUAGES}:
@@ -111,6 +142,8 @@ class BackendStore:
             s.language = language
         if elevenlabs is not None:
             s.elevenlabs = bool(elevenlabs)
+        if vision is not None:
+            s.vision = bool(vision)
         if el_voice_id is not None:
             s.el_voice_id = str(el_voice_id).strip()
             s.el_voice_name = str(el_voice_name or "").strip()
@@ -121,7 +154,9 @@ class BackendStore:
             s.el_model = el_model
         s.updated_at = datetime.now().astimezone().isoformat(timespec="seconds")
         self.save()
-        log.info("backend: %s, %s, voice %s", s.brain, s.language,
+        own = s.voices.get(providers_mod.brain(s.brain)["provider"]) or "default"
+        log.info("backend: %s, %s, voice %s, camera vision %s", s.brain, s.language,
                  "ElevenLabs {} ({})".format(s.el_model, s.el_voice_name or s.el_voice_id or "default")
-                 if s.elevenlabs else "native")
+                 if s.elevenlabs else "native ({})".format(own),
+                 "on" if s.vision else "off")
         return s

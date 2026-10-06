@@ -58,6 +58,10 @@ FILES = [
     "providers/elevenlabs_voice.py",
     # The dashboard's backend picker (brain / language / ElevenLabs voice).
     "backend.py",
+    # Gestures for gpt-live-1, which has no motion tools of its own.
+    "motion_director.py",
+    # Camera vision: frames from the daemon's camera socket to the brain.
+    "vision.py",
     "vad.py",
     "vad_onnx.py",
     "local_transport.py",
@@ -91,6 +95,7 @@ IMPORT_CHECKS = [
     "credentials",
     "persona",
     "providers",
+    "vision",
     "conversation",
     "show_editor",
     "system",

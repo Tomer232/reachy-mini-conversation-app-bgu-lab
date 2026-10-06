@@ -453,6 +453,7 @@ log_robot_stderr = logging.getLogger("reachy.robot.stderr")
 log_state = logging.getLogger("reachy.state")
 log_motion = logging.getLogger("reachy.motion")
 log_tools = logging.getLogger("reachy.tools")
+log_vision = logging.getLogger("reachy.vision")
 
 # Module-level EventLogger handle. Set by Conversation.run(); accessed via
 # _emit() so call sites never have to null-check or try/except (the helper
@@ -465,6 +466,34 @@ _EV: "EventLogger | None" = None
 # SystemState in system.py. Records the most recent state so each transition
 # has a `from` field. Unchanged from the monolith.
 _STATE: str = "IDLE"
+
+# Gestures for a brain without motion tools (gpt-live-1): chosen from its own
+# output transcript by motion_director.py. Set by Conversation.run() for such
+# a brain; None otherwise, and every hook below is then a no-op.
+_DIRECTOR = None
+
+# Extra loudness on top of the speaker's own volume, set by the dashboard's
+# volume bar above 100%. The hub already puts the speaker at 100% on Connect,
+# so "louder" can only come from the signal (Tomer, 2026-10-05). 1.0 = off.
+OUTPUT_GAIN = 1.0
+OUTPUT_GAIN_MAX = 2.0
+
+
+def apply_output_gain(samples: np.ndarray) -> np.ndarray:
+    """Boost int16 speech by OUTPUT_GAIN with a soft limiter, so a loud
+    syllable is rounded off instead of clipping into a crackle."""
+    gain = OUTPUT_GAIN
+    if gain <= 1.0 or samples.size == 0:
+        return samples
+    x = samples.astype(np.float32) * (gain / 32768.0)
+    # Linear up to KNEE of full scale, then a tanh curve that approaches but
+    # never reaches full scale. A plain tanh softened everything and made
+    # x1.5 only ~1.26x louder.
+    knee = 0.7
+    a = np.abs(x)
+    over = a > knee
+    a[over] = knee + (1.0 - knee) * np.tanh((a[over] - knee) / (1.0 - knee))
+    return (np.sign(x) * a * 32767.0).astype(np.int16)
 
 # Per-turn tool-call counter. Read by _handle_tool_call to enforce
 # MAX_TOOL_CALLS_PER_TURN; read by the drain watchdog too. Reset on
@@ -1199,6 +1228,7 @@ class StreamingRobotPlayer:
         """
         if samples_int16_24k.size == 0:
             return False
+        samples_int16_24k = apply_output_gain(samples_int16_24k)
         self._carry_24k = (
             np.concatenate([self._carry_24k, samples_int16_24k])
             if self._carry_24k.size else samples_int16_24k
@@ -1512,14 +1542,14 @@ class SessionSpec:
 
     __slots__ = ("provider", "system_prompt", "voice", "language", "model",
                  "persona_summary", "robot", "credential", "voice_layer",
-                 "brain_id")
+                 "brain_id", "vision", "vision_how")
 
     def __init__(self, provider=None, system_prompt: "str | None" = None,
                  voice: str = "", language: str = "", model: str = "",
                  persona_summary: str = "base",
                  robot: "dict | None" = None,
                  credential: "dict | None" = None,
-                 voice_layer=None, brain_id: str = ""):
+                 voice_layer=None, brain_id: str = "", vision: bool = False):
         import providers as _providers
         self.provider = provider if provider is not None else _providers.get("gemini")
         self.system_prompt = (system_prompt if system_prompt is not None
@@ -1534,9 +1564,19 @@ class SessionSpec:
         # the backend speaking with its own voice, as it always has.
         self.voice_layer = voice_layer
         self.brain_id = brain_id
+        # Camera vision (vision.py): `vision` is the dashboard switch; the
+        # turn loop sets `vision_how` once it knows a camera is really there
+        # -- "image" (the brain gets pictures), "notes" (descriptions), or ""
+        # (the robot is not told it can see).
+        self.vision = bool(vision)
+        self.vision_how = ""
 
     def build_config(self):
-        return build_live_config(self.provider, self.system_prompt,
+        prompt = self.system_prompt
+        if self.vision_how:
+            import vision as _vision
+            prompt = prompt + _vision.prompt_addendum(self.language, self.vision_how)
+        return build_live_config(self.provider, prompt,
                                  self.voice, self.language, model=self.model)
 
     @property
@@ -1570,6 +1610,7 @@ class SessionSpec:
         flags["turn_tail_pad_s"] = self.tail_pad_s
         flags["tts"] = (self.voice_layer.describe() if self.voice_layer is not None
                         else "native")
+        flags["vision"] = self.vision_how or "off"
         return flags
 
 
@@ -1818,6 +1859,8 @@ async def drain_one_turn_streaming(
     asst_parts: list[str] = []
     first_chunk_t: float | None = None
     first_to_robot_t: float | None = None
+    if _DIRECTOR is not None:
+        _DIRECTOR.start_turn()
 
     # Batch counters for gemini.recv.audio_batch — flush every 10 chunks
     # (or at turn end). Per-chunk events would multiply the JSONL volume by
@@ -2038,12 +2081,16 @@ async def drain_one_turn_streaming(
             if sc.input_transcription and sc.input_transcription.text:
                 txt = sc.input_transcription.text
                 user_parts.append(txt)
+                if _DIRECTOR is not None:
+                    _DIRECTOR.user_text(txt)
                 _emit("gemini.recv.text", kind="user", text=txt)
                 _mark_recv("text")
                 drain_state["text_parts"] += 1
             if sc.output_transcription and sc.output_transcription.text:
                 txt = sc.output_transcription.text
                 asst_parts.append(txt)
+                if _DIRECTOR is not None:
+                    _DIRECTOR.robot_text(txt)
                 _emit("gemini.recv.text", kind="assistant", text=txt)
                 _mark_recv("text")
                 drain_state["text_parts"] += 1
@@ -2067,6 +2114,8 @@ async def drain_one_turn_streaming(
         else:
             raise
     finally:
+        if _DIRECTOR is not None:
+            _DIRECTOR.end_turn()
         # Always cancel the watchdog on drain exit — normal break, normal
         # cancel, AND hard_abort all converge here. asyncio task leaks
         # are silent killers under repeated cancellation.
@@ -2192,6 +2241,78 @@ class Conversation:
         self._stop_flag.set()
         self.stop_event.set()
 
+    def _make_director(self):
+        """A gesture director for a brain that cannot move the robot itself
+        (gpt-live-1); None for Gemini, which calls its own motion tools."""
+        import motion_director
+        provider = self.session_spec.provider
+        if not (motion_director.ENABLED and getattr(provider, "name", "") == "gpt_live"
+                and EMOTION_NAMES):
+            return None
+        try:
+            import credentials
+            # use_hub=False: the hub's key is the one this robot was launched
+            # on, possibly Gemini's; the director needs the OpenAI one.
+            key = credentials.resolve(credentials.GPT_LIVE, use_hub=False).key
+        except Exception as e:  # noqa: BLE001
+            log_motion.warning("gesture director off: no OpenAI key (%s)", e)
+            return None
+        log_motion.info("gesture director on (%s, up to %d moves per reply)",
+                        motion_director.MODEL, motion_director.MAX_MOVES_PER_TURN)
+        return motion_director.MotionDirector(
+            self.robot.send_motion_command, key,
+            EMOTIONS_CATALOG, DANCES_CATALOG, HEAD_DIRECTIONS)
+
+    def _make_vision(self):
+        """(CameraFeed, SceneDescriber or None, how) when the robot can see in
+        this conversation, else None. Gemini takes the frames themselves
+        ("image"); gpt-live-1 takes descriptions of them ("notes")."""
+        import vision
+        spec = self.session_spec
+        if not (spec.vision and vision.ENABLED):
+            log_vision.info("camera vision off")
+            return None
+        feed = vision.CameraFeed()
+        if not feed.available:
+            log_vision.info("camera vision on, but %s", feed.label)
+            return None
+        how = "notes" if getattr(spec.provider, "name", "") == "gpt_live" else "image"
+        describer = None
+        if how == "notes":
+            try:
+                import credentials
+                key = credentials.resolve(credentials.GPT_LIVE, use_hub=False).key
+            except Exception as e:  # noqa: BLE001
+                log_vision.warning("camera vision off: no OpenAI key for the "
+                                   "describer (%s)", e)
+                return None
+            describer = vision.SceneDescriber(key)
+        feed.start()
+        log_vision.info("camera vision on: %s, %s", feed.label,
+                        "frames go to the model with each turn" if how == "image"
+                        else "described by {} for the model".format(describer.model))
+        return feed, describer, how
+
+    async def _send_frame(self, session, feed, turn: int) -> None:
+        """The newest camera frame to Gemini, ahead of the turn's audio. A
+        failure here costs the picture, never the turn."""
+        frame = feed.latest()
+        if frame is None:
+            log_vision.info("vision: no fresh camera frame for turn %d", turn)
+            _emit("vision.frame.missing", turn_id=turn)
+            return
+        try:
+            await session.send_realtime_input(
+                video=types.Blob(data=frame.jpeg, mime_type="image/jpeg"))
+        except Exception as e:  # noqa: BLE001
+            log_vision.warning("vision: frame not sent (%s)", e)
+            return
+        age_ms = int((time.monotonic() - frame.t) * 1000)
+        log_vision.info("vision: frame %dx%d %d B (%d ms old) sent with turn %d",
+                        frame.width, frame.height, len(frame.jpeg), age_ms, turn)
+        _emit("vision.frame.sent", turn_id=turn, bytes=len(frame.jpeg),
+              width=frame.width, height=frame.height, age_ms=age_ms)
+
     async def run(self) -> str:
         """Run the turn loop until end-phrase, stop_event, or fatal error.
 
@@ -2200,12 +2321,17 @@ class Conversation:
         reason is recorded in telemetry and the exception is re-raised so the
         SystemManager wrapper can broadcast a crash.
         """
-        global _EV, _STATE
+        global _EV, _STATE, _DIRECTOR
 
         convo = self.dir
         _EV = EventLogger(convo.dir, conversation_id=convo.dir.name)
         self._ev = _EV
         _STATE = "IDLE"
+        _DIRECTOR = self._make_director()
+        # Before the session opens: whether the robot can see decides what
+        # its system prompt says about its eyes.
+        vis = self._make_vision()
+        self.session_spec.vision_how = vis[2] if vis else ""
 
         # Re-emit startup flags per conversation so summary.config stays
         # populated (the system-wide VAD/robot bring-up already happened and
@@ -2256,6 +2382,8 @@ class Conversation:
                               prev_turn_id=reopen_prev_turn_id,
                               latency_ms=_connect_ms,
                               attempt_index=session_attempt)
+                    if vis is not None and vis[2] == "notes":
+                        session.attach_vision(vis[0], vis[1])
                     while True:
                         if self.stop_event.is_set():
                             shutdown_reason = self._stop_reason
@@ -2300,6 +2428,11 @@ class Conversation:
                         # asks for none, so its bytes are unchanged.
                         send_audio = (np.concatenate([mic_audio, tail_pad])
                                       if tail_pad.size else mic_audio)
+                        if vis is not None and vis[2] == "image":
+                            # What the robot sees as the person finishes
+                            # speaking -- "what am I holding?" is answered
+                            # from this picture.
+                            await self._send_frame(session, vis[0], turn)
                         try:
                             await session.send_realtime_input(
                                 audio=types.Blob(
@@ -2493,6 +2626,8 @@ class Conversation:
             # session.close + main.shutdown records on disk. Per-conversation
             # scope: we do NOT close the robot here (SystemManager owns it and
             # keeps it breathing for the next conversation).
+            if vis is not None:
+                vis[0].close()
             _emit("gemini.session.close", reason=shutdown_reason)
             _emit("main.shutdown", reason=shutdown_reason)
             log_main.info("Conversation saved to %s",

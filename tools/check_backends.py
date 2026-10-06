@@ -17,6 +17,11 @@ words came back as text, and the goodbye ended the conversation. The audio
 is in conversations/<timestamp>/turn_NNN.wav to listen to afterwards.
 
 Combination syntax: <brain>:<language>[+el]   e.g. gemini-3.1:he, gpt-live-1:en+el
+
+Camera vision: `--see photo.jpg` makes that picture the robot's camera
+(REACHY_CAMERA_IMAGE, see vision.py) and plays two turns instead: "can you
+see me? what am I wearing and holding?" (<lang>_see.wav) and the goodbye.
+Read the reply against the picture.
 """
 
 from __future__ import annotations
@@ -77,12 +82,21 @@ def parse_combo(text: str) -> dict:
             "name": text}
 
 
-async def run_combo(combo: dict, port: int, play: bool, timeout_s: float) -> dict:
+async def run_combo(combo: dict, port: int, play: bool, timeout_s: float,
+                    see: str = "") -> dict:
+    import os
     import websockets
     lang = combo["language"]
     # Auto switches language every turn: Hebrew, English, Hebrew goodbye.
     langs = ["he", "en", "he"] if lang == "auto" else [lang] * 3
     wavs = [str(AUDIO / "{}_{}.wav".format(l, i)) for l, i in zip(langs, (1, 2, 3))]
+    env = dict(os.environ)
+    env.pop("REACHY_CAMERA_IMAGE", None)
+    if see:
+        langs = langs[:2]
+        wavs = [str(AUDIO / "{}_see.wav".format(langs[0])),
+                str(AUDIO / "{}_3.wav".format(langs[1]))]
+        env["REACHY_CAMERA_IMAGE"] = str(Path(see).resolve())
     result_langs = langs
     cmd = [PY, "-u", str(ROOT / "tools" / "dry_run.py"), "--no-browser",
            "--port", str(port)]
@@ -95,7 +109,7 @@ async def run_combo(combo: dict, port: int, play: bool, timeout_s: float) -> dic
     log_path.parent.mkdir(exist_ok=True)
     log_fh = open(log_path, "w", encoding="utf-8")
     proc = subprocess.Popen(cmd, cwd=str(ROOT), stdout=log_fh,
-                            stderr=subprocess.STDOUT)
+                            stderr=subprocess.STDOUT, env=env)
     base = "http://127.0.0.1:{}".format(port)
     result = {"combo": combo["name"], "ok": False, "turns": [], "ended": None,
               "errors": [], "log": str(log_path)}
@@ -116,7 +130,7 @@ async def run_combo(combo: dict, port: int, play: bool, timeout_s: float) -> dic
                 return result
             r = await http.put(base + "/api/backend", json={
                 "brain": combo["brain"], "language": lang,
-                "elevenlabs": combo["elevenlabs"]})
+                "elevenlabs": combo["elevenlabs"], "vision": True})
             if r.status_code != 200:
                 result["errors"].append("picker refused: " + r.text)
                 return result
@@ -168,7 +182,8 @@ async def run_combo(combo: dict, port: int, play: bool, timeout_s: float) -> dic
 
     replied = [t for t in result["turns"] if t.get("robot") and not t.get("aborted")]
     with_audio = [t for t in result["turns"] if t.get("audio_s", 0) > 0.3]
-    result["ok"] = (len(replied) >= 3 and len(with_audio) >= 3
+    need = len(wavs)
+    result["ok"] = (len(replied) >= need and len(with_audio) >= need
                     and result["ended"] == "end_phrase")
     # Every reply must be in the language that turn was spoken in.
     for t, want in zip(result["turns"], result_langs):
@@ -205,6 +220,8 @@ def _add_timings(result: dict, conv_dir: Path) -> None:
             d["audio_s"] = e.get("samples_sent_to_robot", 0) / 16000
         elif e["event"] == "tool.dispatched":
             d.setdefault("tools", []).append(e.get("function_name"))
+        elif e["event"] == "vision.frame.sent":
+            d["frame"] = "{}x{} {} B".format(e.get("width"), e.get("height"), e.get("bytes"))
     for t in result["turns"]:
         t.update(by_turn.get(t["turn"], {}))
 
@@ -216,9 +233,10 @@ def report(r: dict) -> None:
         if t.get("aborted"):
             print("   turn {}: aborted ({})".format(t["turn"], t["aborted"]))
             continue
-        print("   turn {}: first audio {:.1f}s after speech end, {:.1f}s of speech{}".format(
+        print("   turn {}: first audio {:.1f}s after speech end, {:.1f}s of speech{}{}".format(
             t["turn"], t.get("first_audio_s", 0), t.get("audio_s", 0),
-            ", motion: " + ",".join(t["tools"]) if t.get("tools") else ""))
+            ", motion: " + ",".join(t["tools"]) if t.get("tools") else "",
+            ", camera frame " + t["frame"] if t.get("frame") else ""))
         print("      heard: {}".format(t.get("user", "")))
         print("      said:  {}".format(t.get("robot", "")))
     print("   ended: {}".format(r["ended"]))
@@ -235,6 +253,8 @@ async def amain() -> int:
     ap.add_argument("--play", action="store_true", help="play replies on the speakers")
     ap.add_argument("--port", type=int, default=8799)
     ap.add_argument("--timeout", type=float, default=150.0)
+    ap.add_argument("--see", default="",
+                    help="a JPEG to use as the robot's camera; asks what it sees")
     args = ap.parse_args()
     combos = [parse_combo(c) for c in (args.combos or all_combos())]
     if not args.combos:
@@ -247,7 +267,7 @@ async def amain() -> int:
     try:
         for c in combos:
             print("... {}".format(c["name"]), flush=True)
-            r = await run_combo(c, args.port, args.play, args.timeout)
+            r = await run_combo(c, args.port, args.play, args.timeout, args.see)
             report(r)
             results.append(r)
     finally:
