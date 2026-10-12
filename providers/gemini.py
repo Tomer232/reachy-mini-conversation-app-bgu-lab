@@ -76,6 +76,25 @@ Same day, gemini-3.1-flash-live-preview, same clip:
   tail 3.0 s, blocking (x2) ....... answered, first audio 3.1-3.4 s, Hebrew
 """
 
+# The speaker's languages, for Gemini's transcript of what they said. Measured
+# 2026-10-12 on a lone "להתראות" cut from tools/test_audio/he_3.wav, clean /
+# quiet / noisy: unset gave "Lidrote" / "mit Rot" / "les grottes" (and on the
+# noisy one the model itself answered about caves); he-IL, and he-IL + en-US,
+# gave "להתראות." all three times, and English clips stayed exact.
+TRANSCRIPTION_LANGUAGES = ["he-IL", "en-US"]
+
+
+def _input_transcription():
+    from google.genai import types
+    # The robot's daemon venv gets google-genai unpinned (deploy_robot_app.py),
+    # so an older robot may not know the field; then it is left out, which is
+    # what every robot ran before.
+    if "language_codes" in getattr(types.AudioTranscriptionConfig, "model_fields", {}):
+        return types.AudioTranscriptionConfig(language_codes=TRANSCRIPTION_LANGUAGES)
+    log.warning("google-genai too old for transcription languages; "
+                "short Hebrew words may be transcribed as another language")
+    return types.AudioTranscriptionConfig()
+
 
 class GeminiProvider(SpeechProvider):
     name = "gemini"
@@ -114,7 +133,12 @@ class GeminiProvider(SpeechProvider):
 
         return types.LiveConnectConfig(
             response_modalities=["AUDIO"],
-            input_audio_transcription=types.AudioTranscriptionConfig(),
+            # Told the languages, or a short Hebrew word on the robot's mic
+            # comes back as another language: "להתראות" was "letras" on
+            # reachy1 (2026-10-12), so the goodbye never ended the
+            # conversation. Both codes in every mode: a Hebrew goodbye ends an
+            # English conversation too.
+            input_audio_transcription=_input_transcription(),
             output_audio_transcription=types.AudioTranscriptionConfig(),
             system_instruction=system_prompt,
             speech_config=types.SpeechConfig(

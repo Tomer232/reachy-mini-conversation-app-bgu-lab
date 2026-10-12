@@ -303,6 +303,28 @@ CAPTURE_GAIN_LINUX = 2.0
 # never lies about what tools the model could invoke for a given run.
 ENABLE_TOOL_CALLS = True
 
+# Opening line: the robot speaks first, so a visitor who walked up to it --
+# not the operator at the dashboard -- knows the conversation has started
+# (Tomer, 2026-10-12). The brain says it in its own voice and language, so it
+# is a short instruction, not a script. Measured on gemini-3.8-live: spoken
+# reply in 1.1-1.6 s. Gemini only: gpt-live-1 has no text-input path here.
+# REACHY_OPENER=0 turns it off.
+OPENER_ENABLED = os.environ.get("REACHY_OPENER", "1") != "0"
+OPENER_PROMPTS = {
+    "he": ("[השיחה מתחילה עכשיו ועוד אף אחד לא דיבר. פתח אותה בעברית: "
+           "תגיד היי, שאתה ריצ'י מיני ושנעים להכיר, ושאל שאלה קצרה אחת. "
+           "משפט או שניים קצרים.]"),
+    "en": ("[The conversation is starting now and nobody has spoken yet. Open "
+           "it in English: say hi, that you are Reachy Mini and it's nice to "
+           "meet them, and ask one short question. One or two short sentences.]"),
+}
+# Nobody has spoken yet, so "auto" has no language to follow: Hebrew, the
+# lab's visitors' language.
+OPENER_PROMPTS["auto"] = OPENER_PROMPTS["he"]
+# After the opener, the mic waits for the robot to finish playing it (audio
+# from a text prompt can arrive faster than real time), plus this margin.
+OPENER_PLAYBACK_MARGIN_S = 0.5
+
 # Hard cap on how many tool calls we will dispatch per turn. Anything
 # beyond this is suppressed (no MOTION sentinel, no FunctionResponse to
 # Gemini — Gemini keeps talking, the suppressed call quietly no-ops on
@@ -2313,6 +2335,73 @@ class Conversation:
         _emit("vision.frame.sent", turn_id=turn, bytes=len(frame.jpeg),
               width=frame.width, height=frame.height, age_ms=age_ms)
 
+    async def _speak_opener(self, session) -> None:
+        """Turn 0: the robot opens the conversation (see OPENER_ENABLED).
+
+        Never fatal -- any failure is logged and the conversation carries on
+        listening, exactly as it did before there was an opener."""
+        spec = self.session_spec
+        if not OPENER_ENABLED or spec.provider.name != "gemini":
+            return
+        lang = str(spec.language or "").lower()
+        key = "auto" if lang == "auto" else ("he" if lang.startswith("he") else "en")
+        t = TurnTimings(turn=0)
+        t_start = time.perf_counter()
+        _ev_set_turn(0)
+        _emit("turn.start", turn_id=0, opener=True)
+        _reset_tool_counter()
+        _transition("SENDING", reason="opener")
+        try:
+            await session.send_client_content(
+                turns=[types.Content(role="user",
+                                     parts=[types.Part(text=OPENER_PROMPTS[key])])],
+                turn_complete=True,
+            )
+            t_sent = time.perf_counter()
+            response_audio, _, asst_txt = await drain_one_turn_streaming(
+                session, self.robot, t, t_sent)
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:
+            log_main.warning("Opener skipped: %s", e)
+            try:
+                self.robot.end_turn()
+            except Exception:
+                pass
+            _emit("turn.end", turn_id=0, aborted=True, reason="opener_failed",
+                  total_ms=int((time.perf_counter() - t_start) * 1000),
+                  gemini_first_chunk_ms=0, samples_sent_to_robot=0)
+            _ev_clear_turn()
+            _transition("IDLE", reason="opener_failed")
+            return
+
+        log_stream.info("  ROBOT (opener):  %s", asst_txt or "<no transcript>")
+        if asst_txt:
+            self.dir.append_exchange("", asst_txt)
+            self._push_transcript("robot", 0, asst_txt)
+        if response_audio.size:
+            sf.write(self.dir.turn_wav(0), response_audio,
+                     GEMINI_OUTPUT_RATE, subtype="PCM_16")
+        t.asst_chars = len(asst_txt)
+        t.wall_clock_s = time.perf_counter() - t_start
+        log_main.info(t.log_line())
+        self.dir.append_timing(t)
+        _emit("turn.end", turn_id=0,
+              total_ms=int(t.wall_clock_s * 1000),
+              gemini_first_chunk_ms=int(t.gemini_first_chunk_s * 1000),
+              samples_sent_to_robot=int(response_audio.size * 2 // 3),
+              aborted=t.hard_aborted, reason="opener")
+        _ev_clear_turn()
+        _transition("IDLE", reason="opener_done")
+
+        # Do not open the mic over the robot's own voice.
+        if t.time_to_first_audio_to_robot_s > 0 and t.audio_duration_s > 0:
+            plays_until = (t_sent + t.time_to_first_audio_to_robot_s
+                           + t.audio_duration_s + OPENER_PLAYBACK_MARGIN_S)
+            wait = plays_until - time.perf_counter()
+            if wait > 0:
+                await asyncio.sleep(wait)
+
     async def run(self) -> str:
         """Run the turn loop until end-phrase, stop_event, or fatal error.
 
@@ -2384,6 +2473,8 @@ class Conversation:
                               attempt_index=session_attempt)
                     if vis is not None and vis[2] == "notes":
                         session.attach_vision(vis[0], vis[1])
+                    if session_attempt == 0:
+                        await self._speak_opener(session)
                     while True:
                         if self.stop_event.is_set():
                             shutdown_reason = self._stop_reason

@@ -180,13 +180,24 @@ async def run_combo(combo: dict, port: int, play: bool, timeout_s: float,
             proc.kill()
         log_fh.close()
 
-    replied = [t for t in result["turns"] if t.get("robot") and not t.get("aborted")]
-    with_audio = [t for t in result["turns"] if t.get("audio_s", 0) > 0.3]
+    # Turn 0 is the robot's opening line (conversation.OPENER_ENABLED), on
+    # the brains that have one; it answers nobody, so it is checked apart.
+    opener = next((t for t in result["turns"] if t["turn"] == 0), None)
+    spoken = [t for t in result["turns"] if t["turn"] != 0]
+    replied = [t for t in spoken if t.get("robot") and not t.get("aborted")]
+    with_audio = [t for t in spoken if t.get("audio_s", 0) > 0.3]
     need = len(wavs)
     result["ok"] = (len(replied) >= need and len(with_audio) >= need
                     and result["ended"] == "end_phrase")
+    if opener is not None:
+        want = "en" if lang == "en" else "he"
+        got = "he" if _is_hebrew(opener.get("robot", "")) else "en"
+        if not opener.get("robot") or opener.get("audio_s", 0) <= 0.3 or got != want:
+            result["ok"] = False
+            result["errors"].append("opener: {!r} ({:.1f} s audio, want {})".format(
+                opener.get("robot", ""), opener.get("audio_s", 0), want))
     # Every reply must be in the language that turn was spoken in.
-    for t, want in zip(result["turns"], result_langs):
+    for t, want in zip(spoken, result_langs):
         got = "he" if _is_hebrew(t.get("robot", "")) else "en"
         if t.get("robot") and got != want:
             result["ok"] = False
